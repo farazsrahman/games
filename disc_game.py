@@ -1,4 +1,5 @@
 import numpy as np
+import os
 from tqdm import trange
 from game import Game, contract, run_PSRO_uniform, run_PSRO_uniform_weaker, run_PSRO_uniform_stronger
 from disc_game_vis import gif_from_population
@@ -34,6 +35,9 @@ if __name__ == "__main__":
 
     def demo_disc_game(improvement_function, gif_file_name="demo_PSRO_disc_game"):
 
+        # Ensure static directory exists
+        os.makedirs("out", exist_ok=True)
+
         game = DiscGame()
         learning_rate = 0.01
         num_iterations = 500
@@ -58,7 +62,7 @@ if __name__ == "__main__":
         # Create GIF
         gif_path = gif_from_population(
             np.array(agents_history),
-            path=gif_file_name + ".gif",
+            path="out/" + gif_file_name + ".gif",
             fps=20,
             stride=1,
             dpi=120,

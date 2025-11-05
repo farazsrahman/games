@@ -11,9 +11,15 @@
 To run the disc game demo with PSRO variants:
 
 ```bash
-python disc_game.py
+uv run python disc_game.py
 ```
 
-This will generate two GIF files:
-- `demo_PSRO_u_weaker.gif` - Shows diverse distribution when using uniform_weaker sampling
-- `demo_PSRO_u_stronger.gif` - Shows convergence to same distribution when using uniform_stronger sampling
+This will generate two GIF files in the `static/` folder:
+- `static/demo_PSRO_u_weaker.gif` - Shows diverse distribution when using uniform_weaker sampling
+- `static/demo_PSRO_u_stronger.gif` - Shows convergence to same distribution when using uniform_stronger sampling
+
+## Demo Visualizations
+
+The `static/` folder contains pre-generated demo GIFs:
+- `static/demo_PSRO_u_weaker.gif` - Demonstrates diverse agent distribution with uniform_weaker sampling
+- `static/demo_PSRO_u_stronger.gif` - Demonstrates convergence with uniform_stronger sampling
