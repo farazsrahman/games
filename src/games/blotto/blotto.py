@@ -3,8 +3,8 @@ import numpy as np
 import os
 import copy
 from tqdm import trange
-from game import Game, contract, run_PSRO_uniform, run_PSRO_uniform_weaker, run_PSRO_uniform_stronger
-from disc_game_vis import gif_from_population
+from games.game import Game, contract, run_PSRO_uniform, run_PSRO_uniform_weaker, run_PSRO_uniform_stronger
+from games.blotto.differentiable_lotto_vis import gif_from_population
 
 
 class BlottoAgent:
@@ -136,6 +136,7 @@ class BlottoGame(Game):
         
         return u_new
 
+
 from math import comb
 
 def allocation_to_index(x, N, K):
@@ -202,9 +203,12 @@ def test_index_allocation_map():
     total = comb(N+K-1, K-1)
     seen = {index_to_allocation(i, N, K) for i in range(total)}
     assert len(seen) == total  # bijection
-    breakpoint()
+
 
 if __name__ == "__main__":
+    print("Running Blotto Game Demo...")
+    print("=" * 70)
+    
     game = BlottoGame()
     agent_1 = LogitAgent(3, 10)
     agent_2 = LogitAgent(3, 10)
@@ -213,7 +217,7 @@ if __name__ == "__main__":
     from tqdm import trange
 
     values = []
-    for i in trange(1000):
+    for i in trange(1000, desc="Training iterations"):
         agent_1 = game.improve(agent_1, agent_2)
         val = game.play(agent_1, agent_2, n_rounds=1000)
         values.append(val)
@@ -222,4 +226,14 @@ if __name__ == "__main__":
     plt.xlabel('Iteration')
     plt.ylabel('game.play(agent_1, agent_2, n_rounds=1000)')
     plt.title('Game Play Value Over Time')
-    plt.show()
+    plt.grid(True)
+    plt.tight_layout()
+    
+    # Save plot
+    os.makedirs("demos/blotto", exist_ok=True)
+    plt.savefig("demos/blotto/blotto_training.png")
+    print(f"\nSaved plot to demos/blotto/blotto_training.png")
+    
+    # Close the figure to free memory
+    plt.close()
+    print("Demo completed!")
