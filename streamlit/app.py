@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Dict, Any, Optional
 import time
+import base64
 
 # Add streamlit directory to path for imports
 streamlit_dir = Path(__file__).parent
@@ -21,7 +22,7 @@ from game_runners import (
 
 # Page configuration
 st.set_page_config(
-    page_title="Game Theory Simulations",
+    page_title="Open Ended Zero Sum Game Theory Simulations",
     page_icon="🎮",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -35,7 +36,7 @@ st.markdown("""
         font-weight: bold;
         color: #1f77b4;
         text-align: center;
-        margin-bottom: 2rem;
+        margin-bottom: 1rem;
     }
     .game-section {
         padding: 1rem;
@@ -46,13 +47,20 @@ st.markdown("""
     .stButton>button {
         width: 100%;
     }
-    /* Constrain image sizes - but allow GIFs to animate */
-    .stImage img {
+    /* Constrain static image sizes - but exclude GIFs to allow animation */
+    .stImage img:not([src*=".gif"]) {
         max-height: 400px !important;
         max-width: 500px !important;
         width: auto !important;
         height: auto !important;
         object-fit: contain;
+    }
+    /* Allow GIFs to animate freely - use max-width only */
+    .stImage img[src*=".gif"] {
+        max-width: 900px !important;
+        max-height: 600px !important;
+        width: auto !important;
+        height: auto !important;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -217,6 +225,11 @@ def render_blotto_game_tab():
     
     with col1:
         st.subheader("Configuration")
+        improvement_type = st.selectbox(
+            "Improvement Strategy",
+            ["uniform", "weaker", "stronger"],
+            help="Choose PSRO improvement strategy"
+        )
         num_iterations = st.slider(
             "Number of Iterations",
             min_value=100,
@@ -252,20 +265,24 @@ def render_blotto_game_tab():
     with col2:
         st.subheader("Run Simulation")
         run_button = st.button("Run Demo", type="primary", use_container_width=True, key="blotto_run")
+        run_all_button = st.button("🔄 Run All Variations", use_container_width=True, key="blotto_run_all",
+                                   help="Run 'uniform', 'weaker', and 'stronger' variations")
         
         if run_button:
             with st.spinner("Running simulation... This may take a while."):
                 try:
                     result = run_blotto_game_demo(
+                        improvement_type=improvement_type,
                         num_iterations=num_iterations,
                         n_rounds=n_rounds,
                         n_battlefields=n_battlefields,
                         budget=budget
                     )
                     
-                    run_id = f"blotto_{int(time.time())}"
+                    run_id = f"blotto_{improvement_type}_{int(time.time())}"
                     st.session_state.runs[run_id] = {
                         "game": "blotto",
+                        "type": improvement_type,
                         "result": result,
                         "timestamp": time.time()
                     }
@@ -273,34 +290,138 @@ def render_blotto_game_tab():
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error running simulation: {str(e)}")
+        
+        if run_all_button:
+            variations = ["uniform", "weaker", "stronger"]
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            for idx, var_type in enumerate(variations):
+                status_text.text(f"Running {var_type} variation ({idx + 1}/{len(variations)})...")
+                try:
+                    result = run_blotto_game_demo(
+                        improvement_type=var_type,
+                        num_iterations=num_iterations,
+                        n_rounds=n_rounds,
+                        n_battlefields=n_battlefields,
+                        budget=budget
+                    )
+                    
+                    run_id = f"blotto_{var_type}_{int(time.time())}"
+                    st.session_state.runs[run_id] = {
+                        "game": "blotto",
+                        "type": var_type,
+                        "result": result,
+                        "timestamp": time.time()
+                    }
+                    progress_bar.progress((idx + 1) / len(variations))
+                except Exception as e:
+                    st.error(f"Error running {var_type} variation: {str(e)}")
+            
+            progress_bar.empty()
+            status_text.empty()
+            st.success(f"✅ All {len(variations)} variations completed!")
+            st.rerun()
     
     # Display results
     st.subheader("Results")
     
-    # Check for plot file
-    plot_path = Path("demos/blotto/blotto_training.png")
-    if plot_path.exists():
-        st.image(str(plot_path))
+    # List available demo files (plots and GIFs)
+    demo_files_png = list_demo_files("blotto", ".png")
+    demo_files_gif = list_demo_files("blotto", ".gif")
+    blotto_plots = [f for f in demo_files_png if "blotto_PSRO" in f]
+    blotto_gifs = [f for f in demo_files_gif if "blotto_PSRO" in f and ("population" in f or "matchups" in f)]
+    
+    # Show GIFs if available
+    if blotto_gifs:
+        st.markdown("#### Animated Visualizations")
+        gif_type = st.radio(
+            "Select GIF type",
+            ["Population (Allocations & Entropy)", "Matchups (Win Rates)"],
+            key="blotto_gif_type"
+        )
         
-        with open(plot_path, "rb") as f:
-            st.download_button(
-                label="📥 Download Plot",
-                data=f.read(),
-                file_name="blotto_training.png",
-                mime="image/png",
-                key="blotto_download"
-            )
+        # Filter GIFs by type
+        if "Population" in gif_type:
+            gif_files = [f for f in blotto_gifs if "population" in f]
+        else:
+            gif_files = [f for f in blotto_gifs if "matchups" in f]
         
-        # Show final statistics
-        if "blotto" in [r["game"] for r in st.session_state.runs.values()]:
-            latest_run = max(
-                [r for r in st.session_state.runs.values() if r["game"] == "blotto"],
-                key=lambda x: x["timestamp"]
+        if gif_files:
+            selected_gif = st.selectbox(
+                "Select GIF to display",
+                gif_files,
+                key="blotto_gif_selector"
             )
-            if "result" in latest_run and "final_value" in latest_run["result"]:
-                st.metric("Final Win Rate", f"{latest_run['result']['final_value']:.4f}")
-    else:
-        st.info("No plot available. Run a simulation to generate one.")
+            
+            if selected_gif:
+                gif_path = Path("demos/blotto") / selected_gif
+                if gif_path.exists():
+                    # Read GIF file once for both display and download
+                    with open(gif_path, "rb") as f:
+                        gif_bytes = f.read()
+                        gif_data = base64.b64encode(gif_bytes).decode()
+                    
+                    # Determine max width based on GIF type
+                    max_width = "900px" if "population" in selected_gif else "600px"
+                    
+                    # Use base64 encoding with HTML img tag to ensure GIF animates properly
+                    st.markdown(
+                        f'<img src="data:image/gif;base64,{gif_data}" style="max-width: {max_width}; height: auto;" />',
+                        unsafe_allow_html=True
+                    )
+                    
+                    # Download button
+                    st.download_button(
+                        label="📥 Download GIF",
+                        data=gif_bytes,
+                        file_name=selected_gif,
+                        mime="image/gif",
+                        key="blotto_gif_download"
+                    )
+    
+    # Show static plots
+    if blotto_plots:
+        st.markdown("#### Static Plots")
+        selected_file = st.selectbox(
+            "Select plot to display",
+            blotto_plots,
+            key="blotto_file_selector"
+        )
+        
+        if selected_file:
+            plot_path = Path("demos/blotto") / selected_file
+            if plot_path.exists():
+                st.image(str(plot_path))
+                
+                with open(plot_path, "rb") as f:
+                    st.download_button(
+                        label="📥 Download Plot",
+                        data=f.read(),
+                        file_name=selected_file,
+                        mime="image/png",
+                        key="blotto_download"
+                    )
+    
+    # Show final statistics if available
+    if "blotto" in [r["game"] for r in st.session_state.runs.values()]:
+        latest_run = max(
+            [r for r in st.session_state.runs.values() if r["game"] == "blotto"],
+            key=lambda x: x["timestamp"]
+        )
+        if "result" in latest_run and "final_values" in latest_run["result"]:
+            st.markdown("#### Final Statistics")
+            final_vals = latest_run["result"]["final_values"]
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Agent 1 vs 2", f"{final_vals['agent_1_vs_2']:.4f}")
+            with col2:
+                st.metric("Agent 1 vs 3", f"{final_vals['agent_1_vs_3']:.4f}")
+            with col3:
+                st.metric("Agent 2 vs 3", f"{final_vals['agent_2_vs_3']:.4f}")
+    
+    if not blotto_plots and not blotto_gifs:
+        st.info("No visualizations available. Run a simulation to generate them.")
 
 
 def render_differentiable_lotto_tab():

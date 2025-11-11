@@ -206,34 +206,121 @@ def test_index_allocation_map():
 
 
 if __name__ == "__main__":
-    print("Running Blotto Game Demo...")
+    def demo_blotto_PSRO(improvement_function, plot_file_name="blotto_PSRO"):
+        """Run a PSRO demo of the Blotto game with a given improvement function."""
+        os.makedirs("demos/blotto", exist_ok=True)
+        
+        game = BlottoGame()
+        num_iterations = 1000
+        n_rounds = 1000
+        
+        # Create a population of 3 agents
+        agent_1 = LogitAgent(3, 10)
+        agent_2 = LogitAgent(3, 10)
+        agent_3 = LogitAgent(3, 10)
+        
+        print("=" * 70)
+        print(f"Blotto Game Demo with {improvement_function.__name__}")
+        print("=" * 70)
+        
+        # Track win rates for each agent pair
+        values_12 = []
+        values_13 = []
+        values_23 = []
+        
+        # Track agent history for GIF generation
+        agents_history = [[copy.deepcopy(agent_1), copy.deepcopy(agent_2), copy.deepcopy(agent_3)]]
+        
+        import matplotlib.pyplot as plt
+        from tqdm import trange
+        
+        for i in trange(num_iterations, desc="Training iterations"):
+            population = [agent_1, agent_2, agent_3]
+            
+            # Improve each agent using the PSRO strategy
+            agent_1 = improvement_function(0, population, game)
+            agent_2 = improvement_function(1, population, game)
+            agent_3 = improvement_function(2, population, game)
+            
+            # Store agent states (need to copy since agents are mutable)
+            agents_history.append([copy.deepcopy(agent_1), copy.deepcopy(agent_2), copy.deepcopy(agent_3)])
+            
+            # Evaluate win rates
+            val_12 = game.play(agent_1, agent_2, n_rounds=n_rounds)
+            val_13 = game.play(agent_1, agent_3, n_rounds=n_rounds)
+            val_23 = game.play(agent_2, agent_3, n_rounds=n_rounds)
+            
+            values_12.append(val_12)
+            values_13.append(val_13)
+            values_23.append(val_23)
+        
+        # Create static plot
+        plt.figure(figsize=(12, 6))
+        plt.plot(values_12, label='Agent 1 vs Agent 2', alpha=0.7)
+        plt.plot(values_13, label='Agent 1 vs Agent 3', alpha=0.7)
+        plt.plot(values_23, label='Agent 2 vs Agent 3', alpha=0.7)
+        plt.xlabel('Iteration')
+        plt.ylabel('Win Rate')
+        plt.title(f'Blotto Game: Win Rate Over Time ({improvement_function.__name__})')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        
+        plot_path = f"demos/blotto/{plot_file_name}.png"
+        plt.savefig(plot_path)
+        plt.close()
+        
+        print(f"\nSaved plot to {plot_path}")
+        print(f"Final win rates:")
+        print(f"  Agent 1 vs Agent 2: {values_12[-1]:.4f}")
+        print(f"  Agent 1 vs Agent 3: {values_13[-1]:.4f}")
+        print(f"  Agent 2 vs Agent 3: {values_23[-1]:.4f}")
+        
+        # Create GIF visualizations
+        try:
+            from games.blotto.blotto_vis import gif_from_population, gif_from_matchups
+            
+            # GIF showing expected allocations and entropy
+            gif_path_pop = gif_from_population(
+                agents_history,
+                path=f"demos/blotto/{plot_file_name}_population.gif",
+                fps=20,
+                stride=max(1, num_iterations // 200),  # Limit to ~200 frames
+                dpi=120,
+                show_entropy=True
+            )
+            print(f"Saved population GIF: {gif_path_pop}")
+            
+            # GIF showing win rates over time
+            gif_path_match = gif_from_matchups(
+                game,
+                agents_history,
+                path=f"demos/blotto/{plot_file_name}_matchups.gif",
+                fps=20,
+                stride=max(1, num_iterations // 200),
+                dpi=120,
+                n_rounds=500  # Use fewer rounds for faster computation
+            )
+            print(f"Saved matchups GIF: {gif_path_match}")
+        except ImportError:
+            print("\nNote: Visualization module not available.")
+        except Exception as e:
+            print(f"\nNote: Could not generate GIFs: {e}")
+    
+    # Run all PSRO variants
+    print("Running Blotto Game Demo with PSRO_uniform...")
+    demo_blotto_PSRO(run_PSRO_uniform, "blotto_PSRO_uniform")
+    
+    print("\n" + "=" * 70)
+    print("Running Blotto Game Demo with PSRO_uniform_weaker...")
+    print("=" * 70 + "\n")
+    demo_blotto_PSRO(run_PSRO_uniform_weaker, "blotto_PSRO_uniform_weaker")
+    
+    print("\n" + "=" * 70)
+    print("Running Blotto Game Demo with PSRO_uniform_stronger...")
+    print("=" * 70 + "\n")
+    demo_blotto_PSRO(run_PSRO_uniform_stronger, "blotto_PSRO_uniform_stronger")
+    
+    print("\n" + "=" * 70)
+    print("All PSRO demos completed! Check demos/blotto/ for the generated plots.")
     print("=" * 70)
-    
-    game = BlottoGame()
-    agent_1 = LogitAgent(3, 10)
-    agent_2 = LogitAgent(3, 10)
-
-    import matplotlib.pyplot as plt
-    from tqdm import trange
-
-    values = []
-    for i in trange(1000, desc="Training iterations"):
-        agent_1 = game.improve(agent_1, agent_2)
-        val = game.play(agent_1, agent_2, n_rounds=1000)
-        values.append(val)
-
-    plt.plot(values)
-    plt.xlabel('Iteration')
-    plt.ylabel('game.play(agent_1, agent_2, n_rounds=1000)')
-    plt.title('Game Play Value Over Time')
-    plt.grid(True)
-    plt.tight_layout()
-    
-    # Save plot
-    os.makedirs("demos/blotto", exist_ok=True)
-    plt.savefig("demos/blotto/blotto_training.png")
-    print(f"\nSaved plot to demos/blotto/blotto_training.png")
-    
-    # Close the figure to free memory
-    plt.close()
-    print("Demo completed!")

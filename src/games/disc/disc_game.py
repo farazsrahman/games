@@ -28,8 +28,8 @@ def get_RPS_triangle():
     """Initialize agents in Rock-Paper-Scissors triangle formation."""
     return [
         np.array([0.5, 0]),
-        np.array([-np.sqrt(1)/4,  np.sqrt(3)/4]),
-        np.array([-np.sqrt(1)/4, -np.sqrt(3)/4])
+        np.array([-1/4,  np.sqrt(3)/4]),
+        np.array([-1/4, -np.sqrt(3)/4])
     ]
 
 
