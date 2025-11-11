@@ -17,7 +17,8 @@ from utils import ensure_demo_dir, list_demo_files, get_latest_demo_file, format
 from game_runners import (
     run_disc_game_demo,
     run_blotto_game_demo,
-    run_differentiable_lotto_demo
+    run_differentiable_lotto_demo,
+    run_penneys_game_demo
 )
 
 # Page configuration
@@ -615,6 +616,224 @@ def render_differentiable_lotto_tab():
         st.info("No visualizations available. Run a simulation to generate one.")
 
 
+def render_penneys_game_tab():
+    """Render the Penney's Game tab."""
+    st.header("🪙 Penney's Game")
+    st.markdown("""
+    **Penney's Game** is a non-transitive zero-sum game where two players choose sequences of H/T.
+    A coin is flipped repeatedly, and the first player whose sequence appears wins.
+    This game demonstrates non-transitivity - for any sequence, there's a sequence that beats it with probability > 0.5.
+    """)
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.subheader("Configuration")
+        
+        improvement_type = st.selectbox(
+            "PSRO Strategy",
+            ["uniform", "weaker", "stronger"],
+            index=0,
+            help="PSRO improvement strategy: uniform (sample uniformly), weaker (sample from weaker opponents), stronger (sample from stronger opponents)"
+        )
+        
+        num_iterations = st.slider(
+            "Number of Iterations",
+            min_value=100,
+            max_value=2000,
+            value=500,
+            step=100,
+            help="Number of training iterations"
+        )
+        
+        sequence_length = st.slider(
+            "Sequence Length",
+            min_value=2,
+            max_value=4,
+            value=3,
+            step=1,
+            help="Length of H/T sequences (2^length possible sequences)"
+        )
+        
+        n_rounds = st.slider(
+            "Evaluation Rounds",
+            min_value=100,
+            max_value=2000,
+            value=500,
+            step=100,
+            help="Number of rounds to evaluate win rates"
+        )
+    
+    with col2:
+        st.subheader("Run Simulation")
+        run_button = st.button("Run Demo", type="primary", use_container_width=True, key="penneys_run")
+        run_all_button = st.button("🔄 Run All Variations", use_container_width=True, key="penneys_run_all",
+                                   help="Run all three PSRO variants (uniform, weaker, stronger)")
+    
+    if run_button:
+        with st.spinner("Running Penney's Game simulation..."):
+            try:
+                result = run_penneys_game_demo(
+                    improvement_type=improvement_type,
+                    num_iterations=num_iterations,
+                    sequence_length=sequence_length,
+                    n_rounds=n_rounds
+                )
+                
+                # Store result
+                run_id = f"penneys_{improvement_type}_{int(time.time())}"
+                st.session_state.runs[run_id] = {
+                    "game": "penneys",
+                    "type": improvement_type,
+                    "timestamp": time.time(),
+                    "result": result
+                }
+                
+                st.success("Simulation completed!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error running simulation: {e}")
+    
+    if run_all_button:
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        variants = ["uniform", "weaker", "stronger"]
+        variant_descriptions = {
+            "uniform": "Uniform: Randomly selects any opponent",
+            "weaker": "Weaker: Only improves against opponents it beats",
+            "stronger": "Stronger: Only improves against opponents that beat it"
+        }
+        
+        try:
+            for idx, variant in enumerate(variants):
+                status_text.text(f"Running PSRO {variant.capitalize()}... ({variant_descriptions[variant]})")
+                progress_bar.progress((idx) / len(variants))
+                
+                result = run_penneys_game_demo(
+                    improvement_type=variant,
+                    num_iterations=num_iterations,
+                    sequence_length=sequence_length,
+                    n_rounds=n_rounds
+                )
+                run_id = f"penneys_{variant}_{int(time.time())}"
+                st.session_state.runs[run_id] = {
+                    "game": "penneys",
+                    "type": variant,
+                    "timestamp": time.time(),
+                    "result": result
+                }
+            
+            progress_bar.progress(1.0)
+            status_text.text("All simulations completed!")
+            st.success(f"✅ Completed all 3 PSRO variants! Generated plots and GIFs for: {', '.join(variants)}")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Error running simulations: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+    
+    # Display results
+    st.subheader("Results")
+    
+    # List available demo files
+    demo_files_png = list_demo_files("penneys", ".png")
+    demo_files_gif = list_demo_files("penneys", ".gif")
+    penneys_plots = [f for f in demo_files_png if "penneys_PSRO" in f]
+    penneys_gifs = [f for f in demo_files_gif if "penneys_PSRO" in f and ("population" in f or "matchups" in f)]
+    
+    # Show GIFs if available
+    if penneys_gifs:
+        st.markdown("#### Animated Visualizations")
+        gif_type = st.radio(
+            "Select GIF type",
+            ["Population (Probabilities & Entropy)", "Matchups (Win Rates)"],
+            key="penneys_gif_type"
+        )
+        
+        # Filter GIFs by type
+        if "Population" in gif_type:
+            gif_files = [f for f in penneys_gifs if "population" in f]
+        else:
+            gif_files = [f for f in penneys_gifs if "matchups" in f]
+        
+        if gif_files:
+            selected_gif = st.selectbox(
+                "Select GIF to display",
+                gif_files,
+                key="penneys_gif_selector"
+            )
+            
+            if selected_gif:
+                gif_path = Path("demos/penneys") / selected_gif
+                if gif_path.exists():
+                    # Read GIF file once for both display and download
+                    with open(gif_path, "rb") as f:
+                        gif_bytes = f.read()
+                        gif_data = base64.b64encode(gif_bytes).decode()
+                    
+                    # Determine max width based on GIF type
+                    max_width = "900px" if "population" in selected_gif else "600px"
+                    
+                    # Use base64 encoding with HTML img tag to ensure GIF animates properly
+                    st.markdown(
+                        f'<img src="data:image/gif;base64,{gif_data}" style="max-width: {max_width}; height: auto;" />',
+                        unsafe_allow_html=True
+                    )
+                    
+                    # Download button
+                    st.download_button(
+                        label="📥 Download GIF",
+                        data=gif_bytes,
+                        file_name=selected_gif,
+                        mime="image/gif",
+                        key="penneys_gif_download"
+                    )
+    
+    # Show static plots
+    if penneys_plots:
+        st.markdown("#### Static Plots")
+        selected_file = st.selectbox(
+            "Select plot to display",
+            penneys_plots,
+            key="penneys_file_selector"
+        )
+        
+        if selected_file:
+            plot_path = Path("demos/penneys") / selected_file
+            if plot_path.exists():
+                st.image(str(plot_path))
+                
+                with open(plot_path, "rb") as f:
+                    st.download_button(
+                        label="📥 Download Plot",
+                        data=f.read(),
+                        file_name=selected_file,
+                        mime="image/png",
+                        key="penneys_download"
+                    )
+    
+    # Show final statistics if available
+    if "penneys" in [r["game"] for r in st.session_state.runs.values()]:
+        latest_run = max(
+            [r for r in st.session_state.runs.values() if r["game"] == "penneys"],
+            key=lambda x: x["timestamp"]
+        )
+        if "result" in latest_run and "final_values" in latest_run["result"]:
+            st.markdown("#### Final Statistics")
+            final_vals = latest_run["result"]["final_values"]
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Agent 1 vs 2", f"{final_vals['agent_1_vs_2']:.4f}")
+            with col2:
+                st.metric("Agent 1 vs 3", f"{final_vals['agent_1_vs_3']:.4f}")
+            with col3:
+                st.metric("Agent 2 vs 3", f"{final_vals['agent_2_vs_3']:.4f}")
+    
+    if not penneys_plots and not penneys_gifs:
+        st.info("No visualizations available. Run a simulation to generate them.")
+
+
 def render_comparison_tab():
     """Render the comparison tab."""
     st.header("📊 Comparison Mode")
@@ -672,6 +891,21 @@ def render_comparison_tab():
                     gif_path = result["gif_path"]
                     if gif_path and Path(gif_path).exists():
                         st.image(gif_path)
+                elif game == "penneys" and "plot_path" in result:
+                    plot_path = result["plot_path"]
+                    if Path(plot_path).exists():
+                        st.image(plot_path)
+                    # Also show GIFs if available
+                    if "gif_path_population" in result and result["gif_path_population"]:
+                        gif_path = result["gif_path_population"]
+                        if Path(gif_path).exists():
+                            with open(gif_path, "rb") as f:
+                                gif_bytes = f.read()
+                                gif_data = base64.b64encode(gif_bytes).decode()
+                            st.markdown(
+                                f'<img src="data:image/gif;base64,{gif_data}" style="max-width: 600px; height: auto;" />',
+                                unsafe_allow_html=True
+                            )
                 
                 # Show metadata
                 with st.expander("Details"):
@@ -717,10 +951,11 @@ def main():
             st.rerun()
     
     # Main content tabs
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "🎯 Disc Game",
         "⚔️ Blotto Game",
         "🎲 Differentiable Lotto",
+        "🪙 Penney's Game",
         "📊 Comparison"
     ])
     
@@ -734,6 +969,9 @@ def main():
         render_differentiable_lotto_tab()
     
     with tab4:
+        render_penneys_game_tab()
+    
+    with tab5:
         render_comparison_tab()
 
 

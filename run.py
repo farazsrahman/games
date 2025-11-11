@@ -34,6 +34,12 @@ def run_differentiable_lotto():
     runpy.run_module('games.blotto.differentiable_lotto', run_name='__main__')
 
 
+def run_penneys():
+    """Run the Penney's Game demo by executing its main block."""
+    # Execute the module as if it were run directly
+    runpy.run_module('games.penneys.penneys', run_name='__main__')
+
+
 def run_all():
     """Run all game demos."""
     print("=" * 70)
@@ -45,6 +51,8 @@ def run_all():
     run_blotto()
     print("\n\n")
     run_differentiable_lotto()
+    print("\n\n")
+    run_penneys()
     
     print("\n" + "=" * 70)
     print("All demos completed!")
@@ -59,6 +67,7 @@ def main():
         print("  disc              - Run Disc Game demo")
         print("  blotto            - Run Blotto Game demo")
         print("  differentiable_lotto - Run Differentiable Lotto demo")
+        print("  penneys           - Run Penney's Game demo")
         print("  all               - Run all demos")
         sys.exit(1)
     
@@ -70,11 +79,13 @@ def main():
         run_blotto()
     elif game == "differentiable_lotto" or game == "diff_lotto":
         run_differentiable_lotto()
+    elif game == "penneys" or game == "penney":
+        run_penneys()
     elif game == "all":
         run_all()
     else:
         print(f"Unknown game: {game}")
-        print("Available games: disc, blotto, differentiable_lotto, all")
+        print("Available games: disc, blotto, differentiable_lotto, penneys, all")
         sys.exit(1)
 
 

@@ -19,6 +19,8 @@ from games.disc.disc_game_vis import gif_from_population
 from games.blotto.blotto import BlottoGame, LogitAgent
 from games.blotto.differentiable_lotto import DifferentiableLotto
 from games.blotto.differentiable_lotto_vis import gif_from_matchups
+from games.penneys.penneys import PennysGame, PennysAgent, demo_penneys_game
+from games.penneys.penneys_vis import gif_from_population as penneys_gif_from_population, gif_from_matchups as penneys_gif_from_matchups
 from games.game import run_PSRO_uniform_weaker, run_PSRO_uniform_stronger, run_PSRO_uniform
 
 
@@ -319,6 +321,137 @@ def run_differentiable_lotto_demo(
             game._compute_width(agents_history[-1][1][0], agents_history[-1][1][1]),
             game._compute_width(agents_history[-1][2][0], agents_history[-1][2][1])
         ],
+        "num_iterations": num_iterations
+    }
+
+
+def run_penneys_game_demo(
+    improvement_type: str = "uniform",
+    num_iterations: int = 500,
+    sequence_length: int = 3,
+    n_rounds: int = 500,
+    learning_rate: float = 0.1,
+    fps: int = 20,
+    dpi: int = 120
+) -> Dict[str, Any]:
+    """
+    Run Penney's Game demo.
+    
+    Args:
+        improvement_type: "weaker", "stronger", or "uniform"
+        num_iterations: Number of training iterations
+        sequence_length: Length of H/T sequences (default 3)
+        n_rounds: Number of rounds for evaluation
+        learning_rate: Learning rate for improvement
+        fps: Frames per second for GIF
+        dpi: DPI for visualization
+    
+    Returns:
+        Dictionary with results
+    """
+    os.makedirs("demos/penneys", exist_ok=True)
+    
+    improvement_funcs = {
+        "weaker": run_PSRO_uniform_weaker,
+        "stronger": run_PSRO_uniform_stronger,
+        "uniform": run_PSRO_uniform
+    }
+    improvement_func = improvement_funcs.get(improvement_type, run_PSRO_uniform)
+    plot_name = f"penneys_PSRO_{improvement_type}"
+    
+    game = PennysGame(sequence_length=sequence_length)
+    
+    # Create a population of 3 agents
+    agent_1 = PennysAgent(sequence_length=sequence_length, seed=42)
+    agent_2 = PennysAgent(sequence_length=sequence_length, seed=43)
+    agent_3 = PennysAgent(sequence_length=sequence_length, seed=44)
+    
+    # Initialize with slightly different distributions
+    agent_1.logits = np.random.RandomState(42).randn(2 ** sequence_length)
+    agent_2.logits = np.random.RandomState(43).randn(2 ** sequence_length)
+    agent_3.logits = np.random.RandomState(44).randn(2 ** sequence_length)
+    
+    # Track win rates
+    values_12 = []
+    values_13 = []
+    values_23 = []
+    
+    # Track agent history
+    agents_history = [[agent_1.copy(), agent_2.copy(), agent_3.copy()]]
+    
+    from tqdm import trange
+    
+    for i in trange(num_iterations, desc="Training iterations"):
+        population = [agent_1, agent_2, agent_3]
+        
+        # Improve each agent
+        agent_1 = improvement_func(0, population, game)
+        agent_2 = improvement_func(1, population, game)
+        agent_3 = improvement_func(2, population, game)
+        
+        # Store agent states
+        agents_history.append([agent_1.copy(), agent_2.copy(), agent_3.copy()])
+        
+        # Evaluate win rates
+        val_12 = game.play(agent_1, agent_2, n_rounds=n_rounds)
+        val_13 = game.play(agent_1, agent_3, n_rounds=n_rounds)
+        val_23 = game.play(agent_2, agent_3, n_rounds=n_rounds)
+        
+        values_12.append(val_12)
+        values_13.append(val_13)
+        values_23.append(val_23)
+    
+    # Create static plot
+    plt.figure(figsize=(12, 6))
+    plt.plot(values_12, label='Agent 1 vs Agent 2', alpha=0.7)
+    plt.plot(values_13, label='Agent 1 vs Agent 3', alpha=0.7)
+    plt.plot(values_23, label='Agent 2 vs Agent 3', alpha=0.7)
+    plt.xlabel('Iteration')
+    plt.ylabel('Win Rate (Agent i)')
+    plt.title(f"Penney's Game: Win Rate Over Time ({improvement_type})")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.axhline(0, color='gray', linestyle='--', alpha=0.5)
+    plt.tight_layout()
+    
+    plot_path = f"demos/penneys/{plot_name}.png"
+    plt.savefig(plot_path)
+    plt.close()
+    
+    # Generate GIFs
+    gif_path_pop = None
+    gif_path_match = None
+    try:
+        gif_path_pop = penneys_gif_from_population(
+            agents_history,
+            path=f"demos/penneys/{plot_name}_population.gif",
+            fps=fps,
+            stride=max(1, num_iterations // 200),
+            dpi=dpi,
+            show_entropy=True
+        )
+        
+        gif_path_match = penneys_gif_from_matchups(
+            game,
+            agents_history,
+            path=f"demos/penneys/{plot_name}_matchups.gif",
+            fps=fps,
+            stride=max(1, num_iterations // 200),
+            dpi=dpi,
+            n_rounds=500
+        )
+    except Exception as e:
+        print(f"Could not generate visualization: {e}")
+    
+    return {
+        "plot_path": plot_path,
+        "gif_path_population": gif_path_pop,
+        "gif_path_matchups": gif_path_match,
+        "final_values": {
+            "agent_1_vs_2": values_12[-1],
+            "agent_1_vs_3": values_13[-1],
+            "agent_2_vs_3": values_23[-1]
+        },
         "num_iterations": num_iterations
     }
 
