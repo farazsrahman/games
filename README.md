@@ -13,6 +13,11 @@ src/games/
 └── blotto/              # Colonel Blotto game implementation
     ├── blotto.py
     └── differentiable_lotto_vis.py
+
+streamlit/               # Streamlit web application
+├── app.py              # Main Streamlit application
+├── game_runners.py     # Game execution functions
+└── utils.py            # Utility functions for progress tracking
 ```
 
 ## Setup
@@ -47,7 +52,37 @@ You can set up the environment using either `uv` or the classic `pip` and virtua
 
 ## Running the Demos
 
-### Quick Start (Recommended)
+### Option 1: Streamlit Web Interface (Recommended for Interactive Use)
+
+**Important:** Make sure your virtual environment is activated first!
+
+```bash
+# Activate virtual environment (if using venv)
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Then launch the app
+streamlit run streamlit/app.py
+```
+
+Or use the launcher script (automatically activates venv):
+```bash
+./run_streamlit.sh
+```
+
+This opens a web interface in your browser where you can:
+- Configure game parameters with sliders and inputs
+- Run simulations with real-time progress tracking
+- View visualizations (GIFs and plots) directly in the browser
+- Download generated files
+- Compare multiple runs side by side
+
+The Streamlit app provides tabs for each game:
+- **Disc Game**: Configure iterations, learning rate, and visualization settings
+- **Blotto Game**: Adjust training iterations and evaluation rounds
+- **Differentiable Lotto**: Full control over game parameters, server optimization, and constraints
+- **Comparison**: Compare multiple simulation runs
+
+### Option 2: Command Line (Quick Start)
 
 Use the unified runner script:
 ```bash
