@@ -10,7 +10,10 @@ dependencies = [
     "tqdm>=4.60.0",
     "anthropic",
     "openai",
-    "groq"
+    "groq",
+    "scipy>=1.7.0",
+    "scikit-learn>=1.0.0",
+    "pytest"
 ]
 
 [build-system]
