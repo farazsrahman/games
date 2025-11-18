@@ -8,12 +8,21 @@ dependencies = [
     "matplotlib>=3.3.0",
     "pillow>=8.0.0",
     "tqdm>=4.60.0",
+    "anthropic",
+    "openai",
+    "groq",
+    "scipy>=1.7.0",
+    "scikit-learn>=1.0.0",
+    "pytest"
 ]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build]
+include = ["src/games"]
+
 [tool.hatch.build.targets.wheel]
-packages = ["."]
+packages = ["src/games"]
 
