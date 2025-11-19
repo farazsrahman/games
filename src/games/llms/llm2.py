@@ -2,18 +2,9 @@
 Unified RPS LLM game script for OpenAI (gpt-4o-mini) and Groq (llama-3.1-8b-instant).
 
 Usage:
-    # Install deps:
-    #   pip install openai groq
-
-    # For OpenAI:
-    #   export LLM_PROVIDER=openai
+    # Requires GROQ and OPENAI keys
     #   export OPENAI_API_KEY=sk-...
-    #
-    # For Groq:
-    #   export LLM_PROVIDER=groq
     #   export GROQ_API_KEY=gsk_...
-
-    python rps_unified.py
 """
 import os
 from tqdm import trange
@@ -32,10 +23,9 @@ AGENT_MODEL_NAME = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
 # are not truncated away.
 MAX_TOKENS = int(os.environ.get("GROQ_MAX_TOKENS", "512"))
 
-
 from games.game import Game
 
-# ---- Prompts ----
+# ---- General LLM Game Prompts + Functions ----
 
 AGENT_SYSTEM_PROMPT = """
 You are about to play a two-player game against another large language model.
@@ -52,7 +42,63 @@ OUTPUT RULES (CRITICAL):
 - No explanations, no reasoning, no markdown, no preamble, no quotes.
 """.strip()
 
-game_prompt = """
+def call_model(user_content: str) -> str:
+    """
+    Call the selected LLM (OpenAI or Groq) and return the raw move string.
+    """
+    resp = groq_client.chat.completions.create(
+        model=AGENT_MODEL_NAME,
+        max_tokens=MAX_TOKENS,
+        temperature=1.0,
+        messages=[
+            {"role": "system", "content": AGENT_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+    )
+    return resp.choices[0].message.content.strip()
+
+OPT_SYSTEM_PROMPT = """
+You are about to recieve the transcript of a two player game which includes
+a GAME-PROMPT, two STRATEGY-PROMPTs and a TRANSCRIPT in the different rounds of the game. 
+
+The GAME-PROMPT provided the players instructions on how the game is to be played
+Each agent will have a STRATEGY-PROMPT. The STRATEGY-PROMPT contains instructions 
+that each agent MUST follow when playing the game. 
+
+The TRANSCRIPT will provide information about how the players perform against eachother.
+The format of the TRANSCRIPT will look like ('<player1-action>', '<player2-action>', 'payoff')
+where positive payoff indicates player1 wins negative indicates player 2 wins and vice versa.
+
+You are third-party optimizer for the first player and must reason through
+the transcript of the game, indentify weaknessses in the player's actions 
+and update the STRATEGY-PROMPT of player 1 to increase the probability 
+of beating player 2.
+
+To do this, first create a reasoning summary about the opposing player's actions.
+Then devise how you can exploit this strategy to perform strictly better than them.
+The strategy need not generalize to all agents, but it should perform better against this one.
+
+OUTPUT RULES (CRITICAL):
+- Use reasoning to carefully consider what the best new strategy_prompt is but do NOT include reasoning in the response
+- Return a string that has the following format \"STRATEGY-PROMPT: <strategy-description-here>\"
+""".strip()
+
+def get_opt_prompt(u_prompt: str, v_prompt: str, transcript: str, game_prompt: str) -> str:
+    opt_prompt = f"""
+    {game_prompt}\n\n
+
+    Player 1 {u_prompt}\n\n
+
+    Player 2 {v_prompt}\n\n
+
+    Transcript {transcript}\n\n
+    """.strip()
+
+    return opt_prompt
+
+# ---- RPS Specific Prompts + Functions ----
+
+rps_prompt = """
 GAME-PROMPT:
 You are an agent playing a game called rock-paper-scissors.
 
@@ -86,24 +132,6 @@ STRATEGY-PROMPT: Play paper or scissors with equal probability.
 """.strip()
 
 
-# ---- Core call wrapper ----
-
-def call_model(user_content: str) -> str:
-    """
-    Call the selected LLM (OpenAI or Groq) and return the raw move string.
-    """
-    resp = groq_client.chat.completions.create(
-        model=AGENT_MODEL_NAME,
-        max_tokens=MAX_TOKENS,
-        temperature=1.0,
-        messages=[
-            {"role": "system", "content": AGENT_SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-    )
-    return resp.choices[0].message.content.strip()
-
-
 # ---- Game evaluation ----
 
 def calculate_rps_payout(move_u: str, move_v: str) -> int:
@@ -126,10 +154,10 @@ def calculate_rps_payout(move_u: str, move_v: str) -> int:
     else:
         return 1
 
-def evaluate(u_prompt: str, v_prompt: str):
+def evaluate(u_prompt: str, v_prompt: str, game_prompt: str):
     """
     Evaluate two agents by calling the chosen provider with their respective strategy prompts.
-    Returns the two raw moves ('R', 'P', or 'S').
+    Returns the two raw moves as strings.
     """
     full_u = f"{game_prompt}\n\n{u_prompt}"
     full_v = f"{game_prompt}\n\n{v_prompt}"
@@ -141,60 +169,17 @@ def evaluate(u_prompt: str, v_prompt: str):
 
     return move_u, move_v, payout
 
-OPT_SYSTEM_PROMPT = """
-You are about to recieve the transcript of a two player game which includes
-a GAME-PROMPT, two STRATEGY-PROMPTs and a TRANSCRIPT in the different rounds of the game. 
-
-The GAME-PROMPT provided the players instructions on how the game is to be played
-Each agent will have a STRATEGY-PROMPT. The STRATEGY-PROMPT contains instructions 
-that each agent MUST follow when playing the game. 
-
-The TRANSCRIPT will provide information about how the players perform against eachother.
-The format of the TRANSCRIPT will look like ('<player1-action>', '<player2-action>', 'payoff')
-where positive payoff indicates player1 wins negative indicates player 2 wins and vice versa.
-
-You are third-party optimizer for the first player and must reason through
-the transcript of the game, indentify weaknessses in the player's actions 
-and update the STRATEGY-PROMPT of player 1 to increase the probability 
-of beating player 2.
-
-To do this, first create a reasoning summary about the opposing player's actions.
-Then devise how you can exploit this strategy to perform strictly better than them.
-The strategy need not generalize to all agents, but it should perform better against this one.
-
-OUTPUT RULES (CRITICAL):
-- Use reasoning to carefully consider what the best new strategy_prompt is but do NOT include reasoning in the response
-- Return a string that has the following format \"STRATEGY-PROMPT: <strategy-description-here>\"
-""".strip()
-
-def get_opt_prompt(u_prompt: str, v_prompt: str, transcript: str) -> str:
-    opt_prompt = f"""
-    {game_prompt}\n\n
-
-    Player 1 {u_prompt}\n\n
-
-    Player 2 {v_prompt}\n\n
-
-    Transcript {transcript}\n\n
-    """.strip()
-
-    return opt_prompt
-
-
-def improve(u_prompt: str, v_prompt: str, n_games: int):
+def improve(u_prompt: str, v_prompt: str, n_games: int, game_prompt: str):
     """
     Evaluate two agents in a game n_games times, then collect information and have a big reasoning LLM
     upgrate the prompt.
     """
 
-    full_u = f"{game_prompt}\n\n{u_prompt}"
-    full_v = f"{game_prompt}\n\n{v_prompt}"
-
     transcript = []
     for _ in trange(n_games):
-        transcript.append(evaluate(u_prompt, v_prompt))
+        transcript.append(evaluate(u_prompt, v_prompt, game_prompt))
 
-    opt_prompt=get_opt_prompt(u_prompt, v_prompt, transcript)
+    opt_prompt=get_opt_prompt(u_prompt, v_prompt, transcript, game_prompt)
 
     resp = oai_client.chat.completions.create(
         model=OPT_MODEL_NAME,
@@ -207,16 +192,15 @@ def improve(u_prompt: str, v_prompt: str, n_games: int):
     )
     return resp.choices[0].message.content.strip(), transcript, sum([t[2]for t in transcript]) / len(transcript)
 
-
 class LLMRockPaperScissors(Game):
 
     def play(self, u, v):
-        _, _, value = evaluate(u, v)
+        _, _, value = evaluate(u, v, rps_prompt)
         return value
 
     def improve(self, u, v, *, n_games=10):
         print("U:", u, "\t, V:", v)
-        u_new, _, _ = improve(u, v, n_games)
+        u_new, _, _ = improve(u, v, n_games, rps_prompt)
         print("U_NEW:", u_new)
         return u_new
 
@@ -227,7 +211,8 @@ def empirical_rps_distribution(player_prompt: str, n_games: int = 100):
     """
     outcomes = {'R': 0, 'P': 0, 'S': 0}
     for _ in range(n_games):
-        move = call_model(player_prompt)
+        full_prompt = f"{rps_prompt}\n\n{player_prompt}"
+        move = call_model(full_prompt)
         # move extraction: ensure it's a single char in "RPS"
         if isinstance(move, str) and move in outcomes:
             outcomes[move] += 1
@@ -245,11 +230,11 @@ if __name__ == "__main__":
 
     print(f"Player 1 \n{p1}")
     print(f"Player 2 \n{p2}")
-    p1, _, ev = improve(p1, p2, 10)
+    p1, _, ev = improve(p1, p2, 10, rps_prompt)
     print(f"Player 1 ev = {ev}")
 
 
     print(f"NEW Player 1 \n{p1}")
-    p2, _, nev = improve(p2, p1, 10)
+    p2, _, nev = improve(p2, p1, 10, rps_prompt)
     print(f"Player 1 ev = {-nev}")
     print(f"NEW Player 2 \n{p2}")
