@@ -143,9 +143,9 @@ if __name__ == "__main__":
     E       = np.random.randn(N, N)
     P_rand  = (E - E.T)/2
 
-    th   = 0.7
+    th   = 0.1
 
-    P = (1.0 - th) * P_rand + th * P_cycle
+    P = (1.0 - th) * P_rand + th * P_trans
 
 
     gamescape = EmpiricalGS(P)
