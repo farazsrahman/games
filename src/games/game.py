@@ -28,22 +28,22 @@ def contract(v: np.ndarray):
         v = v / norm_v
     return v
 
-def run_self_play(agent_idx: int, population: list, game: Game):
+def run_self_play(agent_idx: int, population: list, game: Game, **kwargs):
     """
     Simply play agent_idx against itself
     """
-    return game.improve(population[agent_idx], population[agent_idx])
+    return game.improve(population[agent_idx], population[agent_idx], **kwargs)
 
 
-def run_PSRO_uniform(agent_idx: int, population: list, game: Game):
+def run_PSRO_uniform(agent_idx: int, population: list, game: Game, **kwargs):
     """
     This algorithm samples uniformly from the agents
     when deciding how to improve an agent.
     """
     rand_idx = np.random.randint(len(population))
-    return game.improve(population[agent_idx], population[rand_idx])
+    return game.improve(population[agent_idx], population[rand_idx], **kwargs)
 
-def run_PSRO_uniform_weaker(agent_idx: int, population: list, game: Game):
+def run_PSRO_uniform_weaker(agent_idx: int, population: list, game: Game, **kwargs):
     """
     This algorithm samples uniformly from the weaker agents
     when deciding how to improve an agent.
@@ -54,9 +54,9 @@ def run_PSRO_uniform_weaker(agent_idx: int, population: list, game: Game):
     # sample from weaker opponents or fall back to self-play
     rand_weaker_idx = np.random.choice(weaker_indices) if weaker_indices else agent_idx
 
-    return game.improve(population[agent_idx], population[rand_weaker_idx])
+    return game.improve(population[agent_idx], population[rand_weaker_idx], **kwargs)
 
-def run_PSRO_uniform_stronger(agent_idx: int, population: list, game: Game):
+def run_PSRO_uniform_stronger(agent_idx: int, population: list, game: Game, **kwargs):
     """
     This algorithm samples uniformly from the stronger agents
     when deciding how to improve an agent.
@@ -67,4 +67,48 @@ def run_PSRO_uniform_stronger(agent_idx: int, population: list, game: Game):
     # sample from defeated opponents or fall back to self-play
     rand_stronger_idx = np.random.choice(stronger_indices) if stronger_indices else agent_idx
 
-    return game.improve(population[agent_idx], population[rand_stronger_idx])
+    return game.improve(population[agent_idx], population[rand_stronger_idx], **kwargs)
+
+def train_population_from_last_agent(initial_population, update_rule, game: Game, n_iters: int, **kwargs):
+    population = initial_population
+
+    for _ in range(n_iters):
+        new_agent = update_rule(
+            agent_idx = -1, 
+            population = population, 
+            game = game,
+            **kwargs
+        )
+        population.append(new_agent)
+
+    return population
+
+if __name__ == "__main__":
+
+
+    from games.disc.disc_game import DiscGame, get_RPS_triangle
+    from games.disc.disc_game_vis import plot_image
+
+    # game = DiscGame()
+    # initial_population = game.get_population()
+    # # final_population = train_population_from_last_agent(initial_population, run_self_play, game, 10)
+    # final_population = train_population_from_last_agent(initial_population, run_PSRO_uniform_stronger, game, 20, learning_rate=.1)
+
+
+    from games.llms.llm2 import LLMRockPaperScissors, rock_prompt, paper_scissors_prompt, empirical_rps_distribution
+    from games.disc.disc_game import rps_to_disc
+
+    game = LLMRockPaperScissors()
+    # Initial population: rock, paper-or-scissors, fully random
+    initial_population = [rock_prompt, paper_scissors_prompt]
+    # final_population = train_population_from_last_agent(initial_population, run_self_play, game, 10)
+    final_population = train_population_from_last_agent(initial_population, run_PSRO_uniform_weaker, game, 10)
+
+    # final_population = [rps_to_disc(empirical_rps_distribution(u, n_games=10)) for u in final_population]
+
+
+
+    # # Plot the final population using plot_image
+    # img = plot_image(final_population)
+    # img.show()
+

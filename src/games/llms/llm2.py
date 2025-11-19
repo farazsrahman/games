@@ -15,7 +15,6 @@ Usage:
 
     python rps_unified.py
 """
-
 import os
 from tqdm import trange
 # ---- Provider selection ----
@@ -34,6 +33,7 @@ AGENT_MODEL_NAME = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
 MAX_TOKENS = int(os.environ.get("GROQ_MAX_TOKENS", "512"))
 
 
+from games.game import Game
 
 # ---- Prompts ----
 
@@ -206,6 +206,36 @@ def improve(u_prompt: str, v_prompt: str, n_games: int):
         ],
     )
     return resp.choices[0].message.content.strip(), transcript, sum([t[2]for t in transcript]) / len(transcript)
+
+
+class LLMRockPaperScissors(Game):
+
+    def play(self, u, v):
+        _, _, value = evaluate(u, v)
+        return value
+
+    def improve(self, u, v, *, n_games=10):
+        print("U:", u, "\t, V:", v)
+        u_new, _, _ = improve(u, v, n_games)
+        print("U_NEW:", u_new)
+        return u_new
+
+
+def empirical_rps_distribution(player_prompt: str, n_games: int = 100):
+    """
+    Evaluates a player n_games times using call_model and returns empirical distribution over R, P, S.
+    """
+    outcomes = {'R': 0, 'P': 0, 'S': 0}
+    for _ in range(n_games):
+        move = call_model(player_prompt)
+        # move extraction: ensure it's a single char in "RPS"
+        if isinstance(move, str) and move in outcomes:
+            outcomes[move] += 1
+
+    total = sum(outcomes.values())
+    if total == 0:
+        return {k: 0.0 for k in outcomes}
+    return {k: v / total for k, v in outcomes.items()}
 
 # ---- Main ----
 

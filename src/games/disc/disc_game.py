@@ -32,6 +32,21 @@ def get_RPS_triangle():
         np.array([-1/4, -np.sqrt(3)/4])
     ]
 
+def rps_to_disc(probs: np.ndarray) -> np.ndarray:
+    """
+    Map a distribution over RPS to its disc-game embedding.
+    """
+    # Ensure it's a numpy array
+    probs = np.asarray(probs, dtype=float)
+    assert probs.shape == (3,), "probs must be shape (3,), corresponding to [R, P, S]"
+    
+    # Get the triangle vertices (pure R, P, S embeddings)
+    R, P, S = get_RPS_triangle()  # each is a 2D np.array
+
+    p_R, p_P, p_S = probs
+    # Barycentric combination in R^2
+    v = p_R * R + p_P * P + p_S * S
+    return v
 
 def demo_disc_game(improvement_function, gif_file_name="demo_PSRO_disc_game"):
     """Run a demo of the disc game with a given improvement function."""
