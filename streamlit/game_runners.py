@@ -21,7 +21,7 @@ from games.blotto.differentiable_lotto import DifferentiableLotto
 from games.blotto.differentiable_lotto_vis import gif_from_matchups
 from games.penneys.penneys import PennysGame, PennysAgent, demo_penneys_game
 from games.penneys.penneys_vis import gif_from_population as penneys_gif_from_population, gif_from_matchups as penneys_gif_from_matchups
-from games.game import run_PSRO_uniform_weaker, run_PSRO_uniform_stronger, run_PSRO_uniform
+from games.game import run_PSRO_uniform_weaker, run_PSRO_uniform_stronger, run_PSRO_uniform, create_population
 
 
 def run_disc_game_demo(
@@ -99,7 +99,8 @@ def run_blotto_game_demo(
     num_iterations: int = 1000,
     n_rounds: int = 1000,
     n_battlefields: int = 3,
-    budget: int = 10
+    budget: int = 10,
+    num_agents: int = 3
 ) -> Dict[str, Any]:
     """
     Run Blotto Game demo with PSRO variants.
@@ -110,6 +111,7 @@ def run_blotto_game_demo(
         n_rounds: Number of rounds per evaluation
         n_battlefields: Number of battlefields
         budget: Total budget
+        num_agents: Number of agents in the population
     
     Returns:
         Dictionary with results
@@ -127,47 +129,51 @@ def run_blotto_game_demo(
     import copy
     
     game = BlottoGame()
-    # Create a population of 3 agents
-    agent_1 = LogitAgent(n_battlefields, budget)
-    agent_2 = LogitAgent(n_battlefields, budget)
-    agent_3 = LogitAgent(n_battlefields, budget)
+    # Create a population of N agents
+    population = create_population(game, num_agents, seed=42, n_battlefields=n_battlefields, budget=budget)
     
-    # Track win rates for each agent pair
-    values_12 = []
-    values_13 = []
-    values_23 = []
+    # Track win rates for all agent pairs
+    win_rates = {f"{i}vs{j}": [] for i in range(num_agents) for j in range(i+1, num_agents)}
     
     # Track agent history for GIF generation
-    agents_history = [[copy.deepcopy(agent_1), copy.deepcopy(agent_2), copy.deepcopy(agent_3)]]
+    agents_history = [[copy.deepcopy(agent) for agent in population]]
+    
+    # Track entropy over time for diversity plot
+    entropies_history = []
     
     for i in range(num_iterations):
-        population = [agent_1, agent_2, agent_3]
-        
         # Improve each agent using the PSRO strategy
-        agent_1 = improvement_func(0, population, game)
-        agent_2 = improvement_func(1, population, game)
-        agent_3 = improvement_func(2, population, game)
+        new_population = []
+        for agent_idx in range(num_agents):
+            improved_agent = improvement_func(agent_idx, population, game)
+            new_population.append(improved_agent)
+        population = new_population
         
         # Store agent states for GIF
-        agents_history.append([copy.deepcopy(agent_1), copy.deepcopy(agent_2), copy.deepcopy(agent_3)])
+        agents_history.append([copy.deepcopy(agent) for agent in population])
         
-        # Evaluate win rates
-        val_12 = game.play(agent_1, agent_2, n_rounds=n_rounds)
-        val_13 = game.play(agent_1, agent_3, n_rounds=n_rounds)
-        val_23 = game.play(agent_2, agent_3, n_rounds=n_rounds)
+        # Track entropy for diversity plot
+        try:
+            from games.blotto.blotto_vis import get_entropy
+            current_entropies = [get_entropy(agent) for agent in population]
+            entropies_history.append(current_entropies)
+        except:
+            pass
         
-        values_12.append(val_12)
-        values_13.append(val_13)
-        values_23.append(val_23)
+        # Evaluate win rates for all pairs
+        for i in range(num_agents):
+            for j in range(i+1, num_agents):
+                val = game.play(population[i], population[j], n_rounds=n_rounds)
+                win_rates[f"{i}vs{j}"].append(val)
     
-    # Create plot
+    # Create win rate plot
     plt.figure(figsize=(12, 6))
-    plt.plot(values_12, label='Agent 1 vs Agent 2', alpha=0.7)
-    plt.plot(values_13, label='Agent 1 vs Agent 3', alpha=0.7)
-    plt.plot(values_23, label='Agent 2 vs Agent 3', alpha=0.7)
+    for pair_key, values in win_rates.items():
+        i, j = map(int, pair_key.split('vs'))
+        plt.plot(values, label=f'Agent {i} vs Agent {j}', alpha=0.7)
     plt.xlabel('Iteration')
     plt.ylabel('Win Rate')
-    plt.title(f'Blotto Game: Win Rate Over Time ({improvement_type})')
+    plt.title(f'Blotto Game: Win Rate Over Time ({improvement_type}, {num_agents} agents)')
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -175,6 +181,141 @@ def run_blotto_game_demo(
     plot_path = f"demos/blotto/{plot_name}.png"
     plt.savefig(plot_path)
     plt.close()
+    
+    # Create expected allocation per battlefield plot
+    allocation_plot_path = None
+    try:
+        from games.blotto.blotto_vis import get_expected_allocation
+        
+        plt.figure(figsize=(12, 6))
+        battlefields = ['Battlefield 1', 'Battlefield 2', 'Battlefield 3']
+        x = np.arange(len(battlefields))
+        width = 0.8 / num_agents
+        agent_colors = plt.cm.tab10(np.linspace(0, 1, num_agents))
+        
+        # Get final expected allocations for all agents
+        for i in range(num_agents):
+            offset = (i - (num_agents - 1) / 2) * width
+            expected = get_expected_allocation(population[i])
+            bars = plt.bar(x + offset, expected, width, 
+                          label=f'Agent {i}', color=agent_colors[i], alpha=0.8)
+            
+            # Add value labels on bars
+            for j, val in enumerate(expected):
+                plt.text(j + offset, val + 0.2, f'{val:.2f}', 
+                        ha='center', va='bottom', fontsize=9)
+        
+        plt.xlabel('Battlefield', fontsize=12)
+        plt.ylabel('Expected Troops', fontsize=12)
+        plt.title(f'Expected Allocation per Battlefield (Final, {improvement_type}, {num_agents} agents)', fontsize=14)
+        plt.xticks(x, battlefields)
+        plt.legend()
+        plt.grid(True, alpha=0.3, axis='y')
+        plt.ylim(0, 10)
+        plt.tight_layout()
+        
+        allocation_plot_path = f"demos/blotto/{plot_name}_allocations.png"
+        plt.savefig(allocation_plot_path)
+        plt.close()
+    except Exception as e:
+        print(f"Could not generate allocation plot: {e}")
+        allocation_plot_path = None
+    
+    # Create policy diversity (entropy) over time plot
+    entropy_plot_path = None
+    if entropies_history:
+        try:
+            from games.blotto.blotto_vis import get_entropy
+            
+            entropies_array = np.array(entropies_history)  # Shape: (iterations, num_agents)
+            iterations = np.arange(len(entropies_history))
+            agent_colors = plt.cm.tab10(np.linspace(0, 1, num_agents))
+            
+            plt.figure(figsize=(12, 6))
+            for i in range(num_agents):
+                plt.plot(iterations, entropies_array[:, i], 
+                        label=f'Agent {i}', color=agent_colors[i], linewidth=2, alpha=0.8)
+            
+            plt.xlabel('Iteration', fontsize=12)
+            plt.ylabel('Policy Entropy', fontsize=12)
+            plt.title(f'Policy Diversity Over Time ({improvement_type}, {num_agents} agents)', fontsize=14)
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            
+            entropy_plot_path = f"demos/blotto/{plot_name}_entropy.png"
+            plt.savefig(entropy_plot_path)
+            plt.close()
+        except Exception as e:
+            print(f"Could not generate entropy plot: {e}")
+            entropy_plot_path = None
+    
+    # Create payoff matrix (final win rates between all pairs)
+    payoff_matrix_path = None
+    try:
+        # Build symmetric payoff matrix
+        payoff_matrix = np.zeros((num_agents, num_agents))
+        for pair_key, values in win_rates.items():
+            i, j = map(int, pair_key.split('vs'))
+            final_rate = values[-1] if values else 0.5
+            payoff_matrix[i, j] = final_rate
+            payoff_matrix[j, i] = 1.0 - final_rate  # Symmetric
+        
+        # Set diagonal to 0.5 (agents vs themselves)
+        np.fill_diagonal(payoff_matrix, 0.5)
+        
+        plt.figure(figsize=(10, 8))
+        im = plt.imshow(payoff_matrix, cmap='RdYlGn', vmin=0, vmax=1, aspect='auto')
+        plt.colorbar(im, label='Win Rate (Agent i)')
+        
+        # Add text annotations
+        for i in range(num_agents):
+            for j in range(num_agents):
+                text = plt.text(j, i, f'{payoff_matrix[i, j]:.2f}',
+                               ha="center", va="center", color="black", fontweight='bold')
+        
+        plt.xlabel('Agent j', fontsize=12)
+        plt.ylabel('Agent i', fontsize=12)
+        plt.title(f'Final Payoff Matrix ({improvement_type}, {num_agents} agents)', fontsize=14)
+        plt.xticks(range(num_agents), [f'Agent {i}' for i in range(num_agents)])
+        plt.yticks(range(num_agents), [f'Agent {i}' for i in range(num_agents)])
+        plt.tight_layout()
+        
+        payoff_matrix_path = f"demos/blotto/{plot_name}_payoff_matrix.png"
+        plt.savefig(payoff_matrix_path)
+        plt.close()
+    except Exception as e:
+        print(f"Could not generate payoff matrix: {e}")
+        payoff_matrix_path = None
+    
+    # Generate Empirical Gamescape Matrix and 2D Embeddings
+    gamescape_matrix_path = None
+    embeddings_2d_path = None
+    try:
+        from games.blotto.blotto_vis import plot_gamescape_matrix, plot_2d_embeddings
+        
+        # Empirical Gamescape Matrix
+        gamescape_matrix_path = plot_gamescape_matrix(
+            game,
+            population,
+            path=f"demos/blotto/{plot_name}_gamescape_matrix.png",
+            n_rounds=n_rounds,
+            dpi=120
+        )
+        
+        # 2D Embeddings
+        embeddings_2d_path = plot_2d_embeddings(
+            game,
+            population,
+            path=f"demos/blotto/{plot_name}_2d_embeddings.png",
+            n_rounds=n_rounds,
+            dpi=120,
+            use_probabilities=True
+        )
+    except Exception as e:
+        print(f"Could not generate gamescape/embeddings plots: {e}")
+        gamescape_matrix_path = None
+        embeddings_2d_path = None
     
     # Generate GIF visualizations
     gif_path_pop = None
@@ -205,19 +346,25 @@ def run_blotto_game_demo(
     except Exception as e:
         print(f"Could not generate GIFs: {e}")
     
+    # Build final values dict for all pairs
+    final_values = {}
+    for pair_key, values in win_rates.items():
+        i, j = map(int, pair_key.split('vs'))
+        final_values[f"agent_{i}_vs_{j}"] = values[-1] if values else 0.0
+    
     return {
-        "plot_path": plot_path,
+        "plot_path": plot_path,  # Win rate over time
+        "allocation_plot_path": allocation_plot_path,  # Expected allocation per battlefield (final)
+        "entropy_plot_path": entropy_plot_path,  # Policy diversity over time
+        "payoff_matrix_path": payoff_matrix_path,  # Final payoff matrix
+        "gamescape_matrix_path": gamescape_matrix_path,  # Empirical Gamescape Matrix
+        "embeddings_2d_path": embeddings_2d_path,  # 2D Embeddings
         "gif_path_population": gif_path_pop,
         "gif_path_matchups": gif_path_match,
-        "values_12": values_12,
-        "values_13": values_13,
-        "values_23": values_23,
-        "final_values": {
-            "agent_1_vs_2": values_12[-1] if values_12 else 0.0,
-            "agent_1_vs_3": values_13[-1] if values_13 else 0.0,
-            "agent_2_vs_3": values_23[-1] if values_23 else 0.0
-        },
-        "num_iterations": num_iterations
+        "win_rates": win_rates,
+        "final_values": final_values,
+        "num_iterations": num_iterations,
+        "num_agents": num_agents
     }
 
 
@@ -332,7 +479,8 @@ def run_penneys_game_demo(
     n_rounds: int = 500,
     learning_rate: float = 0.1,
     fps: int = 20,
-    dpi: int = 120
+    dpi: int = 120,
+    num_agents: int = 3
 ) -> Dict[str, Any]:
     """
     Run Penney's Game demo.
@@ -345,6 +493,7 @@ def run_penneys_game_demo(
         learning_rate: Learning rate for improvement
         fps: Frames per second for GIF
         dpi: DPI for visualization
+        num_agents: Number of agents in the population
     
     Returns:
         Dictionary with results
@@ -359,66 +508,201 @@ def run_penneys_game_demo(
     improvement_func = improvement_funcs.get(improvement_type, run_PSRO_uniform)
     plot_name = f"penneys_PSRO_{improvement_type}"
     
+    import copy
+    
     game = PennysGame(sequence_length=sequence_length)
     
-    # Create a population of 3 agents
-    agent_1 = PennysAgent(sequence_length=sequence_length, seed=42)
-    agent_2 = PennysAgent(sequence_length=sequence_length, seed=43)
-    agent_3 = PennysAgent(sequence_length=sequence_length, seed=44)
+    # Create a population of N agents
+    population = create_population(game, num_agents, seed=42)
     
-    # Initialize with slightly different distributions
-    agent_1.logits = np.random.RandomState(42).randn(2 ** sequence_length)
-    agent_2.logits = np.random.RandomState(43).randn(2 ** sequence_length)
-    agent_3.logits = np.random.RandomState(44).randn(2 ** sequence_length)
+    # Track win rates for all agent pairs
+    win_rates = {f"{i}vs{j}": [] for i in range(num_agents) for j in range(i+1, num_agents)}
     
-    # Track win rates
-    values_12 = []
-    values_13 = []
-    values_23 = []
+    # Track agent history for GIF generation
+    agents_history = [[copy.deepcopy(agent) for agent in population]]
     
-    # Track agent history
-    agents_history = [[agent_1.copy(), agent_2.copy(), agent_3.copy()]]
+    # Track entropy over time for diversity plot
+    entropies_history = []
     
-    from tqdm import trange
-    
-    for i in trange(num_iterations, desc="Training iterations"):
-        population = [agent_1, agent_2, agent_3]
+    for i in range(num_iterations):
+        # Improve each agent using the PSRO strategy
+        new_population = []
+        for agent_idx in range(num_agents):
+            improved_agent = improvement_func(agent_idx, population, game)
+            new_population.append(improved_agent)
+        population = new_population
         
-        # Improve each agent
-        agent_1 = improvement_func(0, population, game)
-        agent_2 = improvement_func(1, population, game)
-        agent_3 = improvement_func(2, population, game)
+        # Store agent states for GIF
+        agents_history.append([copy.deepcopy(agent) for agent in population])
         
-        # Store agent states
-        agents_history.append([agent_1.copy(), agent_2.copy(), agent_3.copy()])
+        # Track entropy for diversity plot
+        try:
+            from games.penneys.penneys_vis import get_entropy
+            current_entropies = [get_entropy(agent) for agent in population]
+            entropies_history.append(current_entropies)
+        except:
+            pass
         
-        # Evaluate win rates
-        val_12 = game.play(agent_1, agent_2, n_rounds=n_rounds)
-        val_13 = game.play(agent_1, agent_3, n_rounds=n_rounds)
-        val_23 = game.play(agent_2, agent_3, n_rounds=n_rounds)
-        
-        values_12.append(val_12)
-        values_13.append(val_13)
-        values_23.append(val_23)
+        # Evaluate win rates for all pairs
+        for i in range(num_agents):
+            for j in range(i+1, num_agents):
+                val = game.play(population[i], population[j], n_rounds=n_rounds)
+                win_rates[f"{i}vs{j}"].append(val)
     
-    # Create static plot
+    # Create win rate plot
     plt.figure(figsize=(12, 6))
-    plt.plot(values_12, label='Agent 1 vs Agent 2', alpha=0.7)
-    plt.plot(values_13, label='Agent 1 vs Agent 3', alpha=0.7)
-    plt.plot(values_23, label='Agent 2 vs Agent 3', alpha=0.7)
+    for pair_key, values in win_rates.items():
+        i, j = map(int, pair_key.split('vs'))
+        plt.plot(values, label=f'Agent {i} vs Agent {j}', alpha=0.7)
     plt.xlabel('Iteration')
     plt.ylabel('Win Rate (Agent i)')
-    plt.title(f"Penney's Game: Win Rate Over Time ({improvement_type})")
+    plt.title(f"Penney's Game: Win Rate Over Time ({improvement_type}, {num_agents} agents)")
     plt.legend()
     plt.grid(True, alpha=0.3)
-    plt.axhline(0, color='gray', linestyle='--', alpha=0.5)
+    plt.axhline(0, color='gray', linestyle='--', alpha=0.5, label='Tie')
     plt.tight_layout()
     
     plot_path = f"demos/penneys/{plot_name}.png"
     plt.savefig(plot_path)
     plt.close()
     
-    # Generate GIFs
+    # Create sequence probability distribution plot (final state)
+    sequence_plot_path = None
+    try:
+        from games.penneys.penneys_vis import get_entropy
+        
+        sequences = population[0].get_all_sequences()
+        num_sequences = len(sequences)
+        x = np.arange(num_sequences)
+        width = 0.8 / num_agents
+        agent_colors = plt.cm.tab10(np.linspace(0, 1, num_agents))
+        
+        plt.figure(figsize=(14, 6))
+        for i in range(num_agents):
+            offset = (i - (num_agents - 1) / 2) * width
+            probs = population[i].get_probabilities()
+            bars = plt.bar(x + offset, probs, width, 
+                          label=f'Agent {i}', color=agent_colors[i], alpha=0.8)
+            
+            # Add value labels on bars
+            for j, val in enumerate(probs):
+                if val > 0.05:  # Only label if significant
+                    plt.text(j + offset, val + 0.02, f'{val:.2f}', 
+                            ha='center', va='bottom', fontsize=8)
+        
+        plt.xlabel('Sequence', fontsize=12)
+        plt.ylabel('Probability', fontsize=12)
+        plt.title(f"Probability Distribution Over Sequences (Final, {improvement_type}, {num_agents} agents)", fontsize=14)
+        plt.xticks(x, sequences, rotation=45, ha='right')
+        plt.legend()
+        plt.grid(True, alpha=0.3, axis='y')
+        plt.ylim(0, 1)
+        plt.tight_layout()
+        
+        sequence_plot_path = f"demos/penneys/{plot_name}_sequences.png"
+        plt.savefig(sequence_plot_path)
+        plt.close()
+    except Exception as e:
+        print(f"Could not generate sequence plot: {e}")
+        sequence_plot_path = None
+    
+    # Create policy diversity (entropy) over time plot
+    entropy_plot_path = None
+    if entropies_history:
+        try:
+            from games.penneys.penneys_vis import get_entropy
+            
+            entropies_array = np.array(entropies_history)  # Shape: (iterations, num_agents)
+            iterations = np.arange(len(entropies_history))
+            agent_colors = plt.cm.tab10(np.linspace(0, 1, num_agents))
+            
+            plt.figure(figsize=(12, 6))
+            for i in range(num_agents):
+                plt.plot(iterations, entropies_array[:, i], 
+                        label=f'Agent {i}', color=agent_colors[i], linewidth=2, alpha=0.8)
+            
+            plt.xlabel('Iteration', fontsize=12)
+            plt.ylabel('Policy Entropy', fontsize=12)
+            plt.title(f'Policy Diversity Over Time ({improvement_type}, {num_agents} agents)', fontsize=14)
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            
+            entropy_plot_path = f"demos/penneys/{plot_name}_entropy.png"
+            plt.savefig(entropy_plot_path)
+            plt.close()
+        except Exception as e:
+            print(f"Could not generate entropy plot: {e}")
+            entropy_plot_path = None
+    
+    # Create payoff matrix (final win rates between all pairs)
+    payoff_matrix_path = None
+    try:
+        # Build symmetric payoff matrix
+        payoff_matrix = np.zeros((num_agents, num_agents))
+        for pair_key, values in win_rates.items():
+            i, j = map(int, pair_key.split('vs'))
+            final_rate = values[-1] if values else 0.0
+            payoff_matrix[i, j] = final_rate
+            payoff_matrix[j, i] = -final_rate  # Symmetric (Penney's is zero-sum)
+        
+        # Set diagonal to 0 (agents vs themselves)
+        np.fill_diagonal(payoff_matrix, 0.0)
+        
+        plt.figure(figsize=(10, 8))
+        im = plt.imshow(payoff_matrix, cmap='RdYlGn', vmin=-1, vmax=1, aspect='auto')
+        plt.colorbar(im, label='Win Rate (Agent i)')
+        
+        # Add text annotations
+        for i in range(num_agents):
+            for j in range(num_agents):
+                text = plt.text(j, i, f'{payoff_matrix[i, j]:.2f}',
+                               ha="center", va="center", color="black", fontweight='bold')
+        
+        plt.xlabel('Agent j', fontsize=12)
+        plt.ylabel('Agent i', fontsize=12)
+        plt.title(f'Final Payoff Matrix ({improvement_type}, {num_agents} agents)', fontsize=14)
+        plt.xticks(range(num_agents), [f'Agent {i}' for i in range(num_agents)])
+        plt.yticks(range(num_agents), [f'Agent {i}' for i in range(num_agents)])
+        plt.tight_layout()
+        
+        payoff_matrix_path = f"demos/penneys/{plot_name}_payoff_matrix.png"
+        plt.savefig(payoff_matrix_path)
+        plt.close()
+    except Exception as e:
+        print(f"Could not generate payoff matrix: {e}")
+        payoff_matrix_path = None
+    
+    # Generate Empirical Gamescape Matrix and 2D Embeddings
+    gamescape_matrix_path = None
+    embeddings_2d_path = None
+    try:
+        from games.penneys.penneys_vis import plot_gamescape_matrix, plot_2d_embeddings
+        
+        # Empirical Gamescape Matrix
+        gamescape_matrix_path = plot_gamescape_matrix(
+            game,
+            population,
+            path=f"demos/penneys/{plot_name}_gamescape_matrix.png",
+            n_rounds=n_rounds,
+            dpi=120
+        )
+        
+        # 2D Embeddings
+        embeddings_2d_path = plot_2d_embeddings(
+            game,
+            population,
+            path=f"demos/penneys/{plot_name}_2d_embeddings.png",
+            n_rounds=n_rounds,
+            dpi=120,
+            use_probabilities=True
+        )
+    except Exception as e:
+        print(f"Could not generate gamescape/embeddings plots: {e}")
+        gamescape_matrix_path = None
+        embeddings_2d_path = None
+    
+    # Generate GIF visualizations
     gif_path_pop = None
     gif_path_match = None
     try:
@@ -441,17 +725,26 @@ def run_penneys_game_demo(
             n_rounds=500
         )
     except Exception as e:
-        print(f"Could not generate visualization: {e}")
+        print(f"Could not generate GIFs: {e}")
     
+    # Build final values dict for all pairs
+    final_values = {}
+    for pair_key, values in win_rates.items():
+        i, j = map(int, pair_key.split('vs'))
+        final_values[f"agent_{i}_vs_{j}"] = values[-1] if values else 0.0
+
     return {
-        "plot_path": plot_path,
+        "plot_path": plot_path,  # Win rate over time
+        "sequence_plot_path": sequence_plot_path,  # Sequence probability distribution (final)
+        "entropy_plot_path": entropy_plot_path,  # Policy diversity over time
+        "payoff_matrix_path": payoff_matrix_path,  # Final payoff matrix
+        "gamescape_matrix_path": gamescape_matrix_path,  # Empirical Gamescape Matrix
+        "embeddings_2d_path": embeddings_2d_path,  # 2D Embeddings
         "gif_path_population": gif_path_pop,
         "gif_path_matchups": gif_path_match,
-        "final_values": {
-            "agent_1_vs_2": values_12[-1],
-            "agent_1_vs_3": values_13[-1],
-            "agent_2_vs_3": values_23[-1]
-        },
-        "num_iterations": num_iterations
+        "win_rates": win_rates,
+        "final_values": final_values,
+        "num_iterations": num_iterations,
+        "num_agents": num_agents
     }
 

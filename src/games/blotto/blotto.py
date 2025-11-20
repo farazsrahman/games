@@ -3,7 +3,7 @@ import numpy as np
 import os
 import copy
 from tqdm import trange
-from games.game import Game, contract, run_PSRO_uniform, run_PSRO_uniform_weaker, run_PSRO_uniform_stronger
+from games.game import Game, contract, run_PSRO_uniform, run_PSRO_uniform_weaker, run_PSRO_uniform_stronger, create_population
 from games.blotto.differentiable_lotto_vis import gif_from_population
 
 
@@ -135,6 +135,15 @@ class BlottoGame(Game):
         u_new.update(rollouts)
         
         return u_new
+    
+    def create_agent(self, n_battlefields: int = 3, budget: int = 10, seed: int = None) -> LogitAgent:
+        """Create a random Blotto agent."""
+        agent = LogitAgent(n_battlefields, budget)
+        if seed is not None:
+            np.random.seed(seed)
+        # Initialize with small random logits for diversity
+        agent.logits = np.random.randn(66) * 0.1
+        return agent
 
 
 from math import comb
@@ -206,7 +215,7 @@ def test_index_allocation_map():
 
 
 if __name__ == "__main__":
-    def demo_blotto_PSRO(improvement_function, plot_file_name="blotto_PSRO"):
+    def demo_blotto_PSRO(improvement_function, plot_file_name="blotto_PSRO", num_agents: int = 3):
         """Run a PSRO demo of the Blotto game with a given improvement function."""
         os.makedirs("demos/blotto", exist_ok=True)
         
@@ -214,54 +223,47 @@ if __name__ == "__main__":
         num_iterations = 1000
         n_rounds = 1000
         
-        # Create a population of 3 agents
-        agent_1 = LogitAgent(3, 10)
-        agent_2 = LogitAgent(3, 10)
-        agent_3 = LogitAgent(3, 10)
+        # Create a population of N agents
+        population = create_population(game, num_agents, seed=42, n_battlefields=3, budget=10)
         
         print("=" * 70)
-        print(f"Blotto Game Demo with {improvement_function.__name__}")
+        print(f"Blotto Game Demo with {improvement_function.__name__} ({num_agents} agents)")
         print("=" * 70)
         
-        # Track win rates for each agent pair
-        values_12 = []
-        values_13 = []
-        values_23 = []
+        # Track win rates for all agent pairs
+        win_rates = {f"{i}vs{j}": [] for i in range(num_agents) for j in range(i+1, num_agents)}
         
         # Track agent history for GIF generation
-        agents_history = [[copy.deepcopy(agent_1), copy.deepcopy(agent_2), copy.deepcopy(agent_3)]]
+        agents_history = [[copy.deepcopy(agent) for agent in population]]
         
         import matplotlib.pyplot as plt
         from tqdm import trange
         
         for i in trange(num_iterations, desc="Training iterations"):
-            population = [agent_1, agent_2, agent_3]
-            
             # Improve each agent using the PSRO strategy
-            agent_1 = improvement_function(0, population, game)
-            agent_2 = improvement_function(1, population, game)
-            agent_3 = improvement_function(2, population, game)
+            new_population = []
+            for agent_idx in range(num_agents):
+                improved_agent = improvement_function(agent_idx, population, game)
+                new_population.append(improved_agent)
+            population = new_population
             
             # Store agent states (need to copy since agents are mutable)
-            agents_history.append([copy.deepcopy(agent_1), copy.deepcopy(agent_2), copy.deepcopy(agent_3)])
+            agents_history.append([copy.deepcopy(agent) for agent in population])
             
-            # Evaluate win rates
-            val_12 = game.play(agent_1, agent_2, n_rounds=n_rounds)
-            val_13 = game.play(agent_1, agent_3, n_rounds=n_rounds)
-            val_23 = game.play(agent_2, agent_3, n_rounds=n_rounds)
-            
-            values_12.append(val_12)
-            values_13.append(val_13)
-            values_23.append(val_23)
+            # Evaluate win rates for all pairs
+            for i in range(num_agents):
+                for j in range(i+1, num_agents):
+                    val = game.play(population[i], population[j], n_rounds=n_rounds)
+                    win_rates[f"{i}vs{j}"].append(val)
         
         # Create static plot
         plt.figure(figsize=(12, 6))
-        plt.plot(values_12, label='Agent 1 vs Agent 2', alpha=0.7)
-        plt.plot(values_13, label='Agent 1 vs Agent 3', alpha=0.7)
-        plt.plot(values_23, label='Agent 2 vs Agent 3', alpha=0.7)
+        for pair_key, values in win_rates.items():
+            i, j = map(int, pair_key.split('vs'))
+            plt.plot(values, label=f'Agent {i} vs Agent {j}', alpha=0.7)
         plt.xlabel('Iteration')
         plt.ylabel('Win Rate')
-        plt.title(f'Blotto Game: Win Rate Over Time ({improvement_function.__name__})')
+        plt.title(f'Blotto Game: Win Rate Over Time ({improvement_function.__name__}, {num_agents} agents)')
         plt.legend()
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
@@ -272,9 +274,47 @@ if __name__ == "__main__":
         
         print(f"\nSaved plot to {plot_path}")
         print(f"Final win rates:")
-        print(f"  Agent 1 vs Agent 2: {values_12[-1]:.4f}")
-        print(f"  Agent 1 vs Agent 3: {values_13[-1]:.4f}")
-        print(f"  Agent 2 vs Agent 3: {values_23[-1]:.4f}")
+        for pair_key, values in win_rates.items():
+            i, j = map(int, pair_key.split('vs'))
+            print(f"  Agent {i} vs Agent {j}: {values[-1]:.4f}")
+        
+        # Create expected allocation per battlefield plot
+        try:
+            from games.blotto.blotto_vis import get_expected_allocation
+            
+            plt.figure(figsize=(12, 6))
+            battlefields = ['Battlefield 1', 'Battlefield 2', 'Battlefield 3']
+            x = np.arange(len(battlefields))
+            width = 0.8 / num_agents
+            agent_colors = plt.cm.tab10(np.linspace(0, 1, num_agents))
+            
+            # Get final expected allocations for all agents
+            for i in range(num_agents):
+                offset = (i - (num_agents - 1) / 2) * width
+                expected = get_expected_allocation(population[i])
+                bars = plt.bar(x + offset, expected, width, 
+                              label=f'Agent {i}', color=agent_colors[i], alpha=0.8)
+                
+                # Add value labels on bars
+                for j, val in enumerate(expected):
+                    plt.text(j + offset, val + 0.2, f'{val:.2f}', 
+                            ha='center', va='bottom', fontsize=9)
+            
+            plt.xlabel('Battlefield', fontsize=12)
+            plt.ylabel('Expected Troops', fontsize=12)
+            plt.title(f'Expected Allocation per Battlefield (Final, {improvement_function.__name__}, {num_agents} agents)', fontsize=14)
+            plt.xticks(x, battlefields)
+            plt.legend()
+            plt.grid(True, alpha=0.3, axis='y')
+            plt.ylim(0, 10)
+            plt.tight_layout()
+            
+            allocation_plot_path = f"demos/blotto/{plot_file_name}_allocations.png"
+            plt.savefig(allocation_plot_path)
+            plt.close()
+            print(f"Saved allocation plot to {allocation_plot_path}")
+        except Exception as e:
+            print(f"Could not generate allocation plot: {e}")
         
         # Create GIF visualizations
         try:

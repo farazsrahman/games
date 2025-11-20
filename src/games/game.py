@@ -68,3 +68,37 @@ def run_PSRO_uniform_stronger(agent_idx: int, population: list, game: Game):
     rand_stronger_idx = np.random.choice(stronger_indices) if stronger_indices else agent_idx
 
     return game.improve(population[agent_idx], population[rand_stronger_idx])
+
+
+def create_population(game: Game, num_agents: int, seed: int = None, **kwargs) -> list:
+    """
+    Create a population of N agents for a given game.
+    
+    Args:
+        game: Game instance that should have a create_agent() method
+        num_agents: Number of agents to create
+        seed: Random seed (will be used as base, each agent gets seed+i)
+        **kwargs: Additional arguments passed to game.create_agent()
+    
+    Returns:
+        List of N agents
+    """
+    if not hasattr(game, 'create_agent'):
+        raise NotImplementedError(
+            f"Game {type(game).__name__} must implement create_agent() method "
+            "to use create_population()"
+        )
+    
+    population = []
+    rng = np.random.RandomState(seed) if seed is not None else None
+    
+    for i in range(num_agents):
+        agent_seed = (seed + i) if seed is not None else None
+        agent_kwargs = kwargs.copy()
+        if agent_seed is not None:
+            agent_kwargs['seed'] = agent_seed
+        
+        agent = game.create_agent(**agent_kwargs)
+        population.append(agent)
+    
+    return population

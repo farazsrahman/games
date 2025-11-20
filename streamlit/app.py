@@ -246,6 +246,14 @@ def render_blotto_game_tab():
             step=100,
             help="Number of rounds per evaluation"
         )
+        num_agents = st.slider(
+            "Number of Agents",
+            min_value=2,
+            max_value=10,
+            value=3,
+            step=1,
+            help="Number of agents in the population"
+        )
         n_battlefields = st.number_input(
             "Number of Battlefields",
             min_value=3,
@@ -277,7 +285,8 @@ def render_blotto_game_tab():
                         num_iterations=num_iterations,
                         n_rounds=n_rounds,
                         n_battlefields=n_battlefields,
-                        budget=budget
+                        budget=budget,
+                        num_agents=num_agents
                     )
                     
                     run_id = f"blotto_{improvement_type}_{int(time.time())}"
@@ -305,7 +314,8 @@ def render_blotto_game_tab():
                         num_iterations=num_iterations,
                         n_rounds=n_rounds,
                         n_battlefields=n_battlefields,
-                        budget=budget
+                        budget=budget,
+                        num_agents=num_agents
                     )
                     
                     run_id = f"blotto_{var_type}_{int(time.time())}"
@@ -413,13 +423,19 @@ def render_blotto_game_tab():
         if "result" in latest_run and "final_values" in latest_run["result"]:
             st.markdown("#### Final Statistics")
             final_vals = latest_run["result"]["final_values"]
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Agent 1 vs 2", f"{final_vals['agent_1_vs_2']:.4f}")
-            with col2:
-                st.metric("Agent 1 vs 3", f"{final_vals['agent_1_vs_3']:.4f}")
-            with col3:
-                st.metric("Agent 2 vs 3", f"{final_vals['agent_2_vs_3']:.4f}")
+            num_agents_in_run = latest_run["result"].get("num_agents", 3)
+            
+            # Create columns dynamically based on number of agent pairs
+            num_pairs = len(final_vals)
+            cols = st.columns(min(num_pairs, 4))  # Max 4 columns per row
+            
+            for idx, (pair_key, value) in enumerate(sorted(final_vals.items())):
+                # Extract agent indices from key like "agent_1_vs_2"
+                parts = pair_key.split("_")
+                agent_i = parts[1]
+                agent_j = parts[3]
+                with cols[idx % 4]:
+                    st.metric(f"Agent {agent_i} vs {agent_j}", f"{value:.4f}")
     
     if not blotto_plots and not blotto_gifs:
         st.info("No visualizations available. Run a simulation to generate them.")
@@ -663,6 +679,15 @@ def render_penneys_game_tab():
             step=100,
             help="Number of rounds to evaluate win rates"
         )
+        
+        num_agents = st.slider(
+            "Number of Agents",
+            min_value=2,
+            max_value=10,
+            value=3,
+            step=1,
+            help="Number of agents in the population"
+        )
     
     with col2:
         st.subheader("Run Simulation")
@@ -677,7 +702,8 @@ def render_penneys_game_tab():
                     improvement_type=improvement_type,
                     num_iterations=num_iterations,
                     sequence_length=sequence_length,
-                    n_rounds=n_rounds
+                    n_rounds=n_rounds,
+                    num_agents=num_agents
                 )
                 
                 # Store result
@@ -714,7 +740,8 @@ def render_penneys_game_tab():
                     improvement_type=variant,
                     num_iterations=num_iterations,
                     sequence_length=sequence_length,
-                    n_rounds=n_rounds
+                    n_rounds=n_rounds,
+                    num_agents=num_agents
                 )
                 run_id = f"penneys_{variant}_{int(time.time())}"
                 st.session_state.runs[run_id] = {

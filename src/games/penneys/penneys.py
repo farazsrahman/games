@@ -2,7 +2,7 @@ import numpy as np
 import os
 import copy
 from tqdm import trange
-from games.game import Game, run_PSRO_uniform, run_PSRO_uniform_weaker, run_PSRO_uniform_stronger
+from games.game import Game, run_PSRO_uniform, run_PSRO_uniform_weaker, run_PSRO_uniform_stronger, create_population
 from typing import List, Tuple
 import random
 
@@ -189,9 +189,20 @@ class PennysGame(Game):
         u_new.logits = u_new.logits - np.max(u_new.logits)
         
         return u_new
+    
+    def create_agent(self, seed: int = None) -> PennysAgent:
+        """Create a random Penney's agent."""
+        agent = PennysAgent(sequence_length=self.sequence_length, seed=seed)
+        # Initialize with random logits for diversity
+        if seed is not None:
+            rng = np.random.RandomState(seed)
+        else:
+            rng = np.random
+        agent.logits = rng.randn(agent.num_sequences) * 0.1
+        return agent
 
 
-def demo_penneys_game(improvement_function, plot_file_name="penneys_PSRO"):
+def demo_penneys_game(improvement_function, plot_file_name="penneys_PSRO", num_agents: int = 3):
     """Run a PSRO demo of Penney's Game with a given improvement function."""
     os.makedirs("demos/penneys", exist_ok=True)
     
@@ -199,61 +210,50 @@ def demo_penneys_game(improvement_function, plot_file_name="penneys_PSRO"):
     num_iterations = 500
     n_rounds = 500
     
-    # Create a population of 3 agents
-    agent_1 = PennysAgent(sequence_length=3, seed=42)
-    agent_2 = PennysAgent(sequence_length=3, seed=43)
-    agent_3 = PennysAgent(sequence_length=3, seed=44)
-    
-    # Initialize with slightly different distributions
-    agent_1.logits = np.random.RandomState(42).randn(8)
-    agent_2.logits = np.random.RandomState(43).randn(8)
-    agent_3.logits = np.random.RandomState(44).randn(8)
+    # Create a population of N agents
+    population = create_population(game, num_agents, seed=42)
     
     print("=" * 70)
-    print(f"Penney's Game Demo with {improvement_function.__name__}")
+    print(f"Penney's Game Demo with {improvement_function.__name__} ({num_agents} agents)")
     print("=" * 70)
     print(f"Sequence length: {game.sequence_length}")
-    print(f"Possible sequences: {agent_1.get_all_sequences()}")
+    if len(population) > 0:
+        print(f"Possible sequences: {population[0].get_all_sequences()}")
     
-    # Track win rates for each agent pair
-    values_12 = []
-    values_13 = []
-    values_23 = []
+    # Track win rates for all agent pairs
+    win_rates = {f"{i}vs{j}": [] for i in range(num_agents) for j in range(i+1, num_agents)}
     
     # Track agent history for visualization
-    agents_history = [[agent_1.copy(), agent_2.copy(), agent_3.copy()]]
+    agents_history = [[agent.copy() for agent in population]]
     
     import matplotlib.pyplot as plt
     from tqdm import trange
     
     for i in trange(num_iterations, desc="Training iterations"):
-        population = [agent_1, agent_2, agent_3]
-        
         # Improve each agent using the PSRO strategy
-        agent_1 = improvement_function(0, population, game)
-        agent_2 = improvement_function(1, population, game)
-        agent_3 = improvement_function(2, population, game)
+        new_population = []
+        for agent_idx in range(num_agents):
+            improved_agent = improvement_function(agent_idx, population, game)
+            new_population.append(improved_agent)
+        population = new_population
         
         # Store agent states
-        agents_history.append([agent_1.copy(), agent_2.copy(), agent_3.copy()])
+        agents_history.append([agent.copy() for agent in population])
         
-        # Evaluate win rates
-        val_12 = game.play(agent_1, agent_2, n_rounds=n_rounds)
-        val_13 = game.play(agent_1, agent_3, n_rounds=n_rounds)
-        val_23 = game.play(agent_2, agent_3, n_rounds=n_rounds)
-        
-        values_12.append(val_12)
-        values_13.append(val_13)
-        values_23.append(val_23)
+        # Evaluate win rates for all pairs
+        for i in range(num_agents):
+            for j in range(i+1, num_agents):
+                val = game.play(population[i], population[j], n_rounds=n_rounds)
+                win_rates[f"{i}vs{j}"].append(val)
     
     # Create static plot
     plt.figure(figsize=(12, 6))
-    plt.plot(values_12, label='Agent 1 vs Agent 2', alpha=0.7)
-    plt.plot(values_13, label='Agent 1 vs Agent 3', alpha=0.7)
-    plt.plot(values_23, label='Agent 2 vs Agent 3', alpha=0.7)
+    for pair_key, values in win_rates.items():
+        i, j = map(int, pair_key.split('vs'))
+        plt.plot(values, label=f'Agent {i} vs Agent {j}', alpha=0.7)
     plt.xlabel('Iteration')
     plt.ylabel('Win Rate (Agent i)')
-    plt.title(f"Penney's Game: Win Rate Over Time ({improvement_function.__name__})")
+    plt.title(f"Penney's Game: Win Rate Over Time ({improvement_function.__name__}, {num_agents} agents)")
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.axhline(0, color='gray', linestyle='--', alpha=0.5, label='Tie')
@@ -265,18 +265,19 @@ def demo_penneys_game(improvement_function, plot_file_name="penneys_PSRO"):
     
     print(f"\nSaved plot to {plot_path}")
     print(f"Final win rates:")
-    print(f"  Agent 1 vs Agent 2: {values_12[-1]:.4f}")
-    print(f"  Agent 1 vs Agent 3: {values_13[-1]:.4f}")
-    print(f"  Agent 2 vs Agent 3: {values_23[-1]:.4f}")
+    for pair_key, values in win_rates.items():
+        i, j = map(int, pair_key.split('vs'))
+        print(f"  Agent {i} vs Agent {j}: {values[-1]:.4f}")
     
-    # Print final probability distributions
-    print("\nFinal probability distributions:")
-    sequences = agent_1.get_all_sequences()
-    for i, agent in enumerate([agent_1, agent_2, agent_3], 1):
-        probs = agent.get_probabilities()
-        print(f"\nAgent {i}:")
-        for seq, prob in zip(sequences, probs):
-            print(f"  {seq}: {prob:.4f}")
+    # Print final probability distributions (only for first few agents to avoid clutter)
+    if len(population) > 0:
+        print("\nFinal probability distributions:")
+        sequences = population[0].get_all_sequences()
+        for i, agent in enumerate(population[:3], 1):  # Show first 3 agents
+            probs = agent.get_probabilities()
+            print(f"\nAgent {i}:")
+            for seq, prob in zip(sequences, probs):
+                print(f"  {seq}: {prob:.4f}")
     
     # Create GIF visualizations
     try:

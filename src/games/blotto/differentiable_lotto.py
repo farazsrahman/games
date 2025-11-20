@@ -1,7 +1,7 @@
 import numpy as np
 import os
 from tqdm import trange
-from games.game import Game, run_PSRO_uniform, run_PSRO_uniform_weaker, run_PSRO_uniform_stronger
+from games.game import Game, run_PSRO_uniform, run_PSRO_uniform_weaker, run_PSRO_uniform_stronger, create_population
 from typing import Tuple
 
 """
@@ -261,8 +261,10 @@ class DifferentiableLotto(Game):
         
         return (p_new, v_new)
     
-    def create_random_agent(self) -> Tuple[np.ndarray, np.ndarray]:
+    def create_agent(self, seed: int = None) -> Tuple[np.ndarray, np.ndarray]:
         """Create a random agent with normalized mass and width=1."""
+        if seed is not None:
+            np.random.seed(seed)
         p = np.random.uniform(0.1, 1.0, size=self.k)
         p = self._project_simplex(p)  # Ensure valid probability distribution
         
@@ -270,10 +272,14 @@ class DifferentiableLotto(Game):
         if self.enforce_width_constraint:
             v = self._normalize_width(p, v)
         return (p, v)
+    
+    def create_random_agent(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Deprecated: Use create_agent() instead. Kept for backward compatibility."""
+        return self.create_agent()
 
 
 if __name__ == "__main__":
-    def demo(improvement_function, gif_file_name="demo_PSRO"):
+    def demo(improvement_function, gif_file_name="demo_PSRO", num_agents: int = 3):
         """Demo function for Differentiable Lotto game."""
         os.makedirs("demos/blotto", exist_ok=True)
         
@@ -284,50 +290,54 @@ if __name__ == "__main__":
         )
         num_iterations = 100
         
-        agent1 = game.create_random_agent()
-        agent2 = game.create_random_agent()
-        agent3 = game.create_random_agent()
+        # Create a population of N agents
+        population = create_population(game, num_agents, seed=42)
         
         print("=" * 70)
-        print("PROJECTED GRADIENT ASCENT DEMO")
+        print(f"PROJECTED GRADIENT ASCENT DEMO ({num_agents} agents)")
         print("=" * 70)
         print("Initial states:")
         print("=" * 70)
-        for i, agent in enumerate([agent1, agent2, agent3], 1):
+        for i, agent in enumerate(population, 1):
             print(f"  Agent {i}: p={agent[0]}, width={game._compute_width(agent[0], agent[1]):.4f}")
         
-        payoffs = [
-            game.play(agent1, agent2),
-            game.play(agent1, agent3),
-            game.play(agent2, agent3)
-        ]
+        # Compute initial payoffs for all pairs
+        initial_payoffs = {}
+        for i in range(num_agents):
+            for j in range(i+1, num_agents):
+                payoff = game.play(population[i], population[j])
+                initial_payoffs[f"{i}vs{j}"] = payoff
         print(f"\nInitial payoffs:")
-        print(f"  Agent 1 vs Agent 2: {payoffs[0]:.4f}")
-        print(f"  Agent 1 vs Agent 3: {payoffs[1]:.4f}")
-        print(f"  Agent 2 vs Agent 3: {payoffs[2]:.4f}")
+        for pair_key, payoff in initial_payoffs.items():
+            i, j = map(int, pair_key.split('vs'))
+            print(f"  Agent {i} vs Agent {j}: {payoff:.4f}")
         
-        agents_history = [[agent1, agent2, agent3]]
+        import copy
+        agents_history = [[(agent[0].copy(), agent[1].copy()) for agent in population]]
         for _ in trange(num_iterations, desc="Iterations"):
-            population = [agent1, agent2, agent3]
-            agent1 = improvement_function(0, population, game)
-            agent2 = improvement_function(1, population, game)
-            agent3 = improvement_function(2, population, game)
-            agents_history.append([agent1, agent2, agent3])
+            # Improve each agent using the PSRO strategy
+            new_population = []
+            for agent_idx in range(num_agents):
+                improved_agent = improvement_function(agent_idx, population, game)
+                new_population.append(improved_agent)
+            population = new_population
+            agents_history.append([(agent[0].copy(), agent[1].copy()) for agent in population])
         
-        payoffs = [
-            game.play(agent1, agent2),
-            game.play(agent1, agent3),
-            game.play(agent2, agent3)
-        ]
+        # Compute final payoffs for all pairs
+        final_payoffs = {}
+        for i in range(num_agents):
+            for j in range(i+1, num_agents):
+                payoff = game.play(population[i], population[j])
+                final_payoffs[f"{i}vs{j}"] = payoff
         print(f"\nFinal payoffs:")
-        print(f"  Agent 1 vs Agent 2: {payoffs[0]:.4f}")
-        print(f"  Agent 1 vs Agent 3: {payoffs[1]:.4f}")
-        print(f"  Agent 2 vs Agent 3: {payoffs[2]:.4f}")
+        for pair_key, payoff in final_payoffs.items():
+            i, j = map(int, pair_key.split('vs'))
+            print(f"  Agent {i} vs Agent {j}: {payoff:.4f}")
         
         print("\n" + "=" * 70)
         print("Final states:")
         print("=" * 70)
-        for i, agent in enumerate([agent1, agent2, agent3], 1):
+        for i, agent in enumerate(population[:3], 1):  # Show first 3 agents
             print(f"  Agent {i}: p={agent[0]}, width={game._compute_width(agent[0], agent[1]):.4f}")
         
         try:

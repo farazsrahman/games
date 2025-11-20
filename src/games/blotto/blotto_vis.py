@@ -297,3 +297,197 @@ def gif_from_matchups(
     
     return path
 
+
+def plot_gamescape_matrix(
+    game,
+    agents: List[BlottoAgent],
+    path: str = "blotto_gamescape_matrix.png",
+    n_rounds: int = 1000,
+    dpi: int = 120,
+) -> str:
+    """
+    Create an Empirical Gamescape Matrix showing payoffs between all agent pairs.
+    
+    Args:
+        game: BlottoGame instance
+        agents: List of agents
+        path: output path
+        n_rounds: number of rounds to evaluate payoffs
+        dpi: figure DPI
+        
+    Returns:
+        Path to saved plot
+    """
+    N = len(agents)
+    payoff_matrix = np.zeros((N, N))
+    
+    # Compute payoffs for all pairs
+    for i in range(N):
+        for j in range(N):
+            if i == j:
+                payoff_matrix[i, j] = 0.5  # Agent vs itself
+            else:
+                # Payoff for agent i against agent j
+                payoff = game.play(agents[i], agents[j], n_rounds=n_rounds)
+                payoff_matrix[i, j] = payoff
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(10, 8), dpi=dpi)
+    
+    # Use diverging colormap (green for positive, red for negative)
+    # Shift payoffs so 0.5 (tie) is at center
+    shifted_matrix = payoff_matrix - 0.5
+    im = ax.imshow(shifted_matrix, cmap='RdYlGn', vmin=-0.5, vmax=0.5, aspect='auto')
+    
+    # Add colorbar
+    cbar = plt.colorbar(im, ax=ax, label='Payoff (shifted)')
+    cbar.set_ticks([-0.5, 0, 0.5])
+    cbar.set_ticklabels(['0.0 (Loss)', '0.5 (Tie)', '1.0 (Win)'])
+    
+    # Add text annotations
+    for i in range(N):
+        for j in range(N):
+            text = ax.text(j, i, f'{payoff_matrix[i, j]:.2f}',
+                          ha="center", va="center", 
+                          color="white" if abs(shifted_matrix[i, j]) > 0.25 else "black",
+                          fontweight='bold', fontsize=8)
+    
+    ax.set_xlabel('Agent j', fontsize=12)
+    ax.set_ylabel('Agent i', fontsize=12)
+    ax.set_title('Empirical Gamescape Matrix (Green: Positive, Red: Negative)', fontsize=14)
+    ax.set_xticks(range(N))
+    ax.set_yticks(range(N))
+    ax.set_xticklabels([f'{i}' for i in range(N)])
+    ax.set_yticklabels([f'{i}' for i in range(N)])
+    
+    plt.tight_layout()
+    plt.savefig(path)
+    plt.close()
+    
+    return path
+
+
+def plot_2d_embeddings(
+    game,
+    agents: List[BlottoAgent],
+    path: str = "blotto_2d_embeddings.png",
+    n_rounds: int = 1000,
+    dpi: int = 120,
+    use_probabilities: bool = True,
+) -> str:
+    """
+    Create 2D embeddings of agents using PCA, colored by row average payoff.
+    
+    Args:
+        game: BlottoGame instance
+        agents: List of agents
+        path: output path
+        n_rounds: number of rounds to evaluate payoffs
+        dpi: figure DPI
+        use_probabilities: If True, use probability distribution; if False, use logits
+        
+    Returns:
+        Path to saved plot
+    """
+    N = len(agents)
+    
+    # Extract policy representations (66-dimensional)
+    policies = []
+    for agent in agents:
+        if use_probabilities:
+            policy = get_agent_probabilities(agent)
+        else:
+            # Use logits (normalized)
+            policy = agent.logits - np.max(agent.logits)
+            policy = np.exp(policy)
+            policy = policy / np.sum(policy)
+        policies.append(policy)
+    
+    policies = np.array(policies)  # Shape: (N, 66)
+    
+    # Compute PCA to reduce to 2D
+    # Center the data
+    mean_policy = np.mean(policies, axis=0)
+    centered_policies = policies - mean_policy
+    
+    # Compute SVD for PCA
+    U, s, Vt = np.linalg.svd(centered_policies, full_matrices=False)
+    
+    # Project to 2D using first 2 principal components
+    embeddings_2d = U[:, :2] @ np.diag(s[:2])
+    
+    # Compute row average payoffs (average win rate for each agent)
+    payoff_matrix = np.zeros((N, N))
+    for i in range(N):
+        for j in range(N):
+            if i == j:
+                payoff_matrix[i, j] = 0.5
+            else:
+                payoff = game.play(agents[i], agents[j], n_rounds=n_rounds)
+                payoff_matrix[i, j] = payoff
+    
+    row_averages = np.mean(payoff_matrix, axis=1)  # Average payoff for each agent
+    
+    # Compute convex hull
+    try:
+        from scipy.spatial import ConvexHull
+        hull = ConvexHull(embeddings_2d)
+        hull_area = hull.volume  # In 2D, volume is area
+        hull_points = embeddings_2d[hull.vertices]
+    except ImportError:
+        # Fallback: compute convex hull manually if scipy not available
+        hull_area = 0.0
+        hull_points = None
+        # Simple convex hull approximation
+        if N >= 3:
+            # Find extreme points
+            min_x_idx = np.argmin(embeddings_2d[:, 0])
+            max_x_idx = np.argmax(embeddings_2d[:, 0])
+            min_y_idx = np.argmin(embeddings_2d[:, 1])
+            max_y_idx = np.argmax(embeddings_2d[:, 1])
+            extreme_indices = [min_x_idx, max_x_idx, min_y_idx, max_y_idx]
+            hull_points = embeddings_2d[extreme_indices]
+            # Approximate area as bounding box area
+            hull_area = (embeddings_2d[:, 0].max() - embeddings_2d[:, 0].min()) * \
+                       (embeddings_2d[:, 1].max() - embeddings_2d[:, 1].min())
+    except:
+        hull_area = 0.0
+        hull_points = None
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(10, 8), dpi=dpi)
+    
+    # Plot convex hull if available
+    if hull_points is not None and len(hull_points) > 2:
+        from matplotlib.patches import Polygon
+        hull_polygon = Polygon(hull_points, closed=True, fill=True, 
+                              alpha=0.2, facecolor='lightblue', edgecolor='blue', linewidth=1.5)
+        ax.add_patch(hull_polygon)
+    
+    # Plot embeddings colored by row average payoff
+    scatter = ax.scatter(embeddings_2d[:, 0], embeddings_2d[:, 1], 
+                        c=row_averages, cmap='viridis', s=100, 
+                        edgecolors='black', linewidths=1.5, zorder=5)
+    
+    # Add colorbar
+    cbar = plt.colorbar(scatter, ax=ax, label='Row Average Payoff')
+    
+    # Add labels for each agent
+    for i in range(N):
+        ax.text(embeddings_2d[i, 0], embeddings_2d[i, 1], f'{i}',
+               ha='center', va='center', fontsize=10, fontweight='bold',
+               color='white' if row_averages[i] < 0.5 else 'black', zorder=6)
+    
+    ax.set_xlabel('Dimension 1', fontsize=12)
+    ax.set_ylabel('Dimension 2', fontsize=12)
+    ax.set_title(f'2D Embeddings (Colored by Row Average) Convex Hull Area: {hull_area:.4f}', 
+                fontsize=14)
+    ax.grid(True, alpha=0.3)
+    ax.axhline(0, color='gray', linestyle='--', alpha=0.5)
+    ax.axvline(0, color='gray', linestyle='--', alpha=0.5)
+    
+    plt.tight_layout()
+    plt.savefig(path)
+    plt.close()
+    
+    return path

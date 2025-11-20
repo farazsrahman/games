@@ -1,7 +1,7 @@
 import numpy as np
 import os
 from tqdm import trange
-from games.game import Game, contract, run_PSRO_uniform_weaker, run_PSRO_uniform_stronger
+from games.game import Game, contract, run_PSRO_uniform_weaker, run_PSRO_uniform_stronger, create_population
 from games.disc.disc_game_vis import gif_from_population
 
 """
@@ -22,6 +22,14 @@ class DiscGame(Game):
         u_new = u + learning_rate * descent_dir
         u_new = contract(u_new)
         return u_new
+    
+    def create_agent(self, seed: int = None) -> np.ndarray:
+        """Create a random agent on the unit circle."""
+        if seed is not None:
+            np.random.seed(seed)
+        # Sample uniformly on unit circle
+        angle = np.random.uniform(0, 2 * np.pi)
+        return np.array([np.cos(angle), np.sin(angle)])
 
 
 def get_RPS_triangle():
@@ -33,7 +41,7 @@ def get_RPS_triangle():
     ]
 
 
-def demo_disc_game(improvement_function, gif_file_name="demo_PSRO_disc_game"):
+def demo_disc_game(improvement_function, gif_file_name="demo_PSRO_disc_game", num_agents: int = 3):
     """Run a demo of the disc game with a given improvement function."""
     
     # Ensure demos/disc directory exists
@@ -43,22 +51,34 @@ def demo_disc_game(improvement_function, gif_file_name="demo_PSRO_disc_game"):
     learning_rate = 0.01
     num_iterations = 500
 
-    rock, paper, scissors = [agent.copy() for agent in get_RPS_triangle()]
-    print("=" * 70)
-    print("Initial states:")
-    print("=" * 70)
-    print(f"  Rock:     {rock}")
-    print(f"  Paper:    {paper}")
-    print(f"  Scissors: {scissors}")
+    # Use RPS triangle for 3 agents, otherwise create random agents
+    if num_agents == 3:
+        population = [agent.copy() for agent in get_RPS_triangle()]
+        print("=" * 70)
+        print("Initial states (RPS triangle):")
+        print("=" * 70)
+        print(f"  Agent 0: {population[0]}")
+        print(f"  Agent 1: {population[1]}")
+        print(f"  Agent 2: {population[2]}")
+    else:
+        # Create random agents on unit circle
+        population = create_population(game, num_agents, seed=42)
+        print("=" * 70)
+        print(f"Initial states ({num_agents} agents):")
+        print("=" * 70)
+        for i, agent in enumerate(population[:5], 1):  # Show first 5
+            print(f"  Agent {i-1}: {agent}")
 
-    agents_history = [[rock.copy(), paper.copy(), scissors.copy()]]
+    agents_history = [[agent.copy() for agent in population]]
 
     for iteration in trange(num_iterations, desc="Iterations"):
-        population  = [rock, paper, scissors] 
-        rock        = improvement_function(0, population, game)
-        paper       = improvement_function(1, population, game)
-        scissors    = improvement_function(2, population, game)
-        agents_history.append([rock.copy(), paper.copy(), scissors.copy()])
+        # Improve each agent using the PSRO strategy
+        new_population = []
+        for agent_idx in range(num_agents):
+            improved_agent = improvement_function(agent_idx, population, game)
+            new_population.append(improved_agent)
+        population = new_population
+        agents_history.append([agent.copy() for agent in population])
 
     # Create GIF
     gif_path = gif_from_population(
@@ -76,9 +96,8 @@ def demo_disc_game(improvement_function, gif_file_name="demo_PSRO_disc_game"):
     print("\n" + "=" * 70)
     print("Final states:")
     print("=" * 70)
-    print(f"  Rock:     {rock}")
-    print(f"  Paper:    {paper}")
-    print(f"  Scissors: {scissors}")
+    for i, agent in enumerate(population[:5], 1):  # Show first 5
+        print(f"  Agent {i-1}: {agent}")
 
 
 if __name__ == "__main__":
