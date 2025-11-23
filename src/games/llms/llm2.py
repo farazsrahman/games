@@ -42,20 +42,37 @@ OUTPUT RULES (CRITICAL):
 - No explanations, no reasoning, no markdown, no preamble, no quotes.
 """.strip()
 
-def call_model(user_content: str) -> str:
+def call_model(user_content: str, *, max_attempts: int = 5, base_delay: float = 1.0, max_delay: float = 30.0) -> str:
     """
     Call the selected LLM (OpenAI or Groq) and return the raw move string.
+    Retries up to max_attempts times on failure, with exponential backoff.
     """
-    resp = groq_client.chat.completions.create(
-        model=AGENT_MODEL_NAME,
-        max_tokens=MAX_TOKENS,
-        temperature=1.0,
-        messages=[
-            {"role": "system", "content": AGENT_SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-    )
-    return resp.choices[0].message.content.strip()
+    import time
+
+    last_exception = None
+    for attempt in range(max_attempts):
+        try:
+            resp = groq_client.chat.completions.create(
+                model=AGENT_MODEL_NAME,
+                max_tokens=MAX_TOKENS,
+                temperature=1.0,
+                messages=[
+                    {"role": "system", "content": AGENT_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_content},
+                ],
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception as e:
+            last_exception = e
+            print(f"[call_model retry]: Attempt {attempt + 1} of {max_attempts} failed with error: {e}")
+            if attempt < max_attempts - 1:
+                delay = min(base_delay * (2 ** attempt), max_delay)
+                print(f"Waiting {delay:.2f} seconds before retrying...")
+                time.sleep(delay)
+            else:
+                print(f"ERROR in call_model: All {max_attempts} attempts failed. Last error: {e}")
+                raise e
+    raise last_exception
 
 OPT_SYSTEM_PROMPT = """
 You are about to recieve the transcript of a two player game which includes
@@ -131,6 +148,15 @@ paper_scissors_prompt = """
 STRATEGY-PROMPT: Play paper or scissors with equal probability.
 """.strip()
 
+random_prompt = """
+STRATEGY-PROMPT: Choose randomly and uniformly between rock, paper, and scissors each round.
+""".strip()
+
+scissors_rock_prompt = """
+STRATEGY-PROMPT: Play scissors or rock with equal probability.
+""".strip()
+
+example_population = [rock_prompt, paper_scissors_prompt, random_prompt, scissors_rock_prompt]
 
 # ---- Game evaluation ----
 
