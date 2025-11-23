@@ -45,31 +45,22 @@ def compute_empirical_payoff_matrix(
     """
     n = len(population)
     
-    # Handle partially completed matrix
     if cached_payoff_matrix is not None:
-        payoff_matrix = cached_payoff_matrix
-        m = payoff_matrix.shape[0]
-        assert m == n-1, "Currently only supports m == n-1 (adding exactly one agent)"
-        # Expand the old matrix to n x n, preserve everything
-        new_matrix = np.zeros((n, n), dtype=float)
-        new_matrix[:m, :m] = payoff_matrix
-        payoff_matrix = new_matrix
-        # Only compute payoffs for new agents (indices m to n-1)
-        agent_indices = list(range(m, n))
-        desc = f"Computing Payoff Matrix (indices {m} to {n-1}) "
-        desc += f"(parallel)" if parallel else "(serial)"
+        m = cached_payoff_matrix.shape[0]
+        payoff_matrix = np.pad(cached_payoff_matrix, ((0, n - m), (0, n - m)), mode='constant')
     else:
+        m = 0
         payoff_matrix = np.zeros((n, n), dtype=float)
-        # Compute payoffs for all agents
-        agent_indices = list(range(n))
-        desc = "Computing Payoff Matrix (parallel)" if parallel else "Computing Payoff Matrix (serial)"
     
-    # Determine which pairs to compute
-    pairs = _compute_pairs_to_evaluate(agent_indices, n, antisymmetric)
-    total_pairs = len(pairs)
+    # Determine which games to compute
+    agent_indices_to_eval = list(range(m, n)) # Only compute payoffs for new agents (indices m to n-1)
+    pairs = _compute_pairs_to_evaluate(agent_indices_to_eval, n, antisymmetric)
     
-    # Compute payoffs using the appropriate method
-    with tqdm(total=total_pairs, desc=desc) as pbar:
+    # Rollout games, compute payoffs
+    with tqdm(
+        total=len(pairs), 
+        desc=f"Computing Payoff Matrix (indices {m} to {n-1}) ({'parallel' if parallel else 'serial'})" 
+    ) as pbar:
         if parallel:
             _compute_payoffs_parallel(pairs, population, game, antisymmetric, n_games, payoff_matrix, pbar)
         else:

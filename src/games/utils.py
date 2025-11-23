@@ -25,12 +25,7 @@ import concurrent.futures
 def _compute_pairs_to_evaluate(agent_indices: list, n: int, antisymmetric: bool) -> list:
     """
     Helper function to determine which pairs of agents need to be evaluated.
-    
-    Args:
-        agent_indices: List of agent indices to compute payoffs for.
-        n: Total number of agents in the population.
-        antisymmetric: If True, treats the game as antisymmetric (only compute i < j).
-    
+     
     Returns:
         List of (i, j) tuples representing pairs to evaluate.
     """
