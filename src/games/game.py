@@ -29,30 +29,6 @@ class Game(ABC):
         """
         pass
 
-
-def contract(v: np.ndarray):
-    """Helper function to keep player inside unit sphere."""
-    norm_v = np.linalg.norm(v)
-    if norm_v >= 1:
-        v = v / norm_v
-    return v
-
-def run_self_play(agent_idx: int, population: list, game: Game, payoff_matrix: np.ndarray, **kwargs):
-    """
-    Simply play agent_idx against itself
-    """
-    return game.improve(population[agent_idx], population[agent_idx], **kwargs)
-
-
-def run_PSRO_uniform(agent_idx: int, population: list, game: Game, payoff_matrix: np.ndarray, **kwargs):
-    """
-    This algorithm samples uniformly from the agents
-    when deciding how to improve an agent.
-    """
-    rand_idx = np.random.randint(len(population))
-    return game.improve(population[agent_idx], population[rand_idx], **kwargs)
-
-
 def compute_empirical_payoff_matrix(
     population: list,
     game: Game,
@@ -104,6 +80,23 @@ def compute_empirical_payoff_matrix(
         payoff_matrix[i, i] = 0.0
     
     return payoff_matrix
+
+
+def run_self_play(agent_idx: int, population: list, game: Game, payoff_matrix: np.ndarray, **kwargs):
+    """
+    Simply play agent_idx against itself
+    """
+    return game.improve(population[agent_idx], population[agent_idx], **kwargs)
+
+
+def run_PSRO_uniform(agent_idx: int, population: list, game: Game, payoff_matrix: np.ndarray, **kwargs):
+    """
+    This algorithm samples uniformly from the agents
+    when deciding how to improve an agent.
+    """
+    rand_idx = np.random.randint(len(population))
+    return game.improve(population[agent_idx], population[rand_idx], **kwargs)
+
 
 def run_PSRO_uniform_weaker(agent_idx: int, population: list, game: Game, payoff_matrix, **kwargs):
     """

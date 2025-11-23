@@ -1,7 +1,7 @@
 import numpy as np
 import os
 from tqdm import trange
-from games.game import Game, contract, run_PSRO_uniform_weaker, run_PSRO_uniform_stronger
+from games.game import Game, run_PSRO_uniform_weaker, run_PSRO_uniform_stronger
 from games.disc.disc_game_vis import gif_from_population
 
 """
@@ -23,6 +23,12 @@ class DiscGame(Game):
         u_new = contract(u_new)
         return u_new
 
+def contract(v: np.ndarray):
+    """Helper function to keep player inside unit sphere."""
+    norm_v = np.linalg.norm(v)
+    if norm_v >= 1:
+        v = v / norm_v
+    return v
 
 def get_RPS_triangle():
     """Initialize agents in Rock-Paper-Scissors triangle formation."""
