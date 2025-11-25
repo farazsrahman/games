@@ -1801,6 +1801,143 @@ def render_llm_competition_tab():
                             st.error(f"Error generating embeddings: {str(e)}")
                             import traceback
                             st.code(traceback.format_exc())
+    
+    # Display loaded experiment data (if experiment was loaded but not initialized for training)
+    elif state.get("experiment_loaded", False) and not state.get("initialized", False):
+        st.markdown("---")
+        st.subheader("📂 Loaded Experiment Data")
+        
+        # Display all agents from loaded experiment
+        if state.get("population"):
+            with st.expander("📋 All Agents", expanded=True):
+                for idx, agent_strategy in enumerate(state["population"]):
+                    st.markdown(f"**Agent {idx + 1}:**")
+                    st.text(agent_strategy)
+                    st.markdown("---")
+        
+        # Display metadata if available
+        if state.get("loaded_experiment_metadata"):
+            metadata = state["loaded_experiment_metadata"]
+            with st.expander("📊 Experiment Metadata", expanded=False):
+                st.json(metadata)
+        
+        # Display EGS matrix if available
+        if state.get("egs_matrix") is not None:
+            st.markdown("---")
+            # Check if we have saved visualization files from a loaded experiment
+            loaded_viz_files = state.get("loaded_experiment_viz_files", [])
+            show_saved_viz = False
+            selected_viz = None
+            
+            st.markdown("#### Empirical Gamescape Matrix")
+            
+            # If we have saved visualization files, offer to display them
+            if loaded_viz_files:
+                st.info(f"💡 Found {len(loaded_viz_files)} saved visualization(s) for this experiment.")
+                viz_methods = {viz["method"]: viz["path"] for viz in loaded_viz_files}
+                
+                selected_viz = st.selectbox(
+                    "View saved visualization:",
+                    options=["None"] + list(viz_methods.keys()),
+                    key="view_saved_viz_loaded"
+                )
+                
+                if selected_viz != "None" and selected_viz in viz_methods:
+                    show_saved_viz = True
+                    viz_path = viz_methods[selected_viz]
+                    try:
+                        with open(viz_path, 'rb') as f:
+                            img_data = base64.b64encode(f.read()).decode()
+                        st.markdown(
+                            f'<img src="data:image/png;base64,{img_data}" style="max-width: 100%;" />',
+                            unsafe_allow_html=True
+                        )
+                    except Exception as e:
+                        st.error(f"Error loading visualization: {e}")
+                        show_saved_viz = False
+            
+            # If no saved visualizations or user wants to see matrix only, show matrix heatmap
+            if not show_saved_viz:
+                # Display matrix heatmap
+                fig, ax = plt.subplots(figsize=(10, 8))
+                matrix = state["egs_matrix"]
+                vmax = np.abs(matrix).max()
+                im = ax.imshow(matrix, cmap='RdYlGn', aspect='auto', 
+                              vmin=-vmax, vmax=vmax, interpolation='nearest')
+                ax.set_title('Empirical Gamescape Matrix\n(Green: Positive, Red: Negative)')
+                ax.set_xlabel('Agent j')
+                ax.set_ylabel('Agent i')
+                plt.colorbar(im, ax=ax, label='Payoff')
+                plt.tight_layout()
+                
+                # Convert to base64 for display
+                buf = io.BytesIO()
+                plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+                buf.seek(0)
+                img_data = base64.b64encode(buf.read()).decode()
+                st.markdown(
+                    f'<img src="data:image/png;base64,{img_data}" style="max-width: 100%;" />',
+                    unsafe_allow_html=True
+                )
+                plt.close(fig)
+            
+            # EGS embeddings visualization
+            st.markdown("#### EGS Embeddings Visualization")
+            embedding_method = st.selectbox(
+                "Embedding Method",
+                ["schur", "PCA", "SVD", "tSNE"],
+                index=0,
+                key="embedding_method_loaded"
+            )
+            
+            if st.button("📈 Generate Embedding Visualization", key="generate_embedding_loaded"):
+                with st.spinner(f"Generating {embedding_method} embeddings..."):
+                    try:
+                        from games.egs import visualize_egs_matrix_and_embeddings
+                        
+                        egs = EmpiricalGS(state["egs_matrix"])
+                        
+                        if embedding_method == "schur":
+                            embeddings = egs.schur_embeddings()
+                        elif embedding_method == "PCA":
+                            embeddings = egs.PCA_embeddings()
+                        elif embedding_method == "SVD":
+                            embeddings = egs.SVD_embeddings()
+                        elif embedding_method == "tSNE":
+                            if state["egs_matrix"].shape[0] > 50:
+                                st.warning("t-SNE may be slow for large populations. Using PCA instead.")
+                                embeddings = egs.PCA_embeddings()
+                            else:
+                                embeddings = egs.tSNE_embeddings()
+                        
+                        # Use the existing visualization function directly
+                        # Save to a temporary file, then read it for display
+                        import tempfile
+                        import os
+                        
+                        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+                            tmp_path = tmp_file.name
+                        
+                        # Call the function to generate and save the visualization
+                        visualize_egs_matrix_and_embeddings(egs, embeddings, save_path=tmp_path)
+                        
+                        # Read the saved file and convert to base64
+                        with open(tmp_path, 'rb') as f:
+                            img_data = base64.b64encode(f.read()).decode()
+                        
+                        # Clean up temp file
+                        os.unlink(tmp_path)
+                        
+                        st.markdown(
+                            f'<img src="data:image/png;base64,{img_data}" style="max-width: 100%;" />',
+                            unsafe_allow_html=True
+                        )
+                        
+                    except Exception as e:
+                        st.error(f"Error generating embeddings: {str(e)}")
+                        import traceback
+                        st.code(traceback.format_exc())
+    
     else:
         st.info("👆 Click 'Initialize Training' to begin.")
 
