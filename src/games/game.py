@@ -83,53 +83,99 @@ def compute_empirical_payoff_matrix(
     return payoff_matrix
 
 
-def run_self_play(agent_idx: int, population: list, game: Game, payoff_matrix: np.ndarray, **kwargs):
-    """
-    Simply play agent_idx against itself
-    """
-    return game.improve(population[agent_idx], population[agent_idx], **kwargs)
+# ---- Population Distribution Helpers ----
 
+def get_self_play_distribution(agent_idx, payoff_matrix):
+    n = payoff_matrix.shape[0]
+    dist = np.zeros(n)
+    dist[agent_idx] = 1.0
+    return dist
 
-def run_PSRO_uniform(agent_idx: int, population: list, game: Game, payoff_matrix: np.ndarray, **kwargs):
+def get_uniform_distribution(agent_idx, payoff_matrix):
+    n = payoff_matrix.shape[0]
+    dist = np.ones(n) / n
+    return dist
+
+def get_uniform_weaker_distribution(agent_idx, payoff_matrix):
+    n = payoff_matrix.shape[0]
+    weaker = [i for i in range(n) if i != agent_idx and payoff_matrix[agent_idx, i] > 0]
+    dist = np.zeros(n)
+    if weaker:
+        for idx in weaker:
+            dist[idx] = 1.0 / len(weaker)
+    else:
+        dist[agent_idx] = 1.0
+    return dist
+
+def get_uniform_stronger_distribution(agent_idx, payoff_matrix):
+    n = payoff_matrix.shape[0]
+    stronger = [i for i in range(n) if i != agent_idx and payoff_matrix[agent_idx, i] < 0]
+    dist = np.zeros(n)
+    if stronger:
+        for idx in stronger:
+            dist[idx] = 1.0 / len(stronger)
+    else:
+        dist[agent_idx] = 1.0
+    return dist
+
+# ---- PSRO Update Rules ----
+
+def run_PSRO(agent_idx: int, population: list, game: Game, payoff_matrix: np.ndarray, opp_distribution_fn, **kwargs):
     """
-    This algorithm samples opponents uniformly from all agents
+    Samples a single opponent according to the provided population distribution fn.
     """
-    rand_idx = np.random.randint(len(population))
+    del kwargs['n_games']
+    dist = opp_distribution_fn(agent_idx, payoff_matrix)
+    rand_idx = np.random.choice(len(population), p=dist)
     return game.improve(population[agent_idx], population[rand_idx], **kwargs)
 
-def run_PSRO_uniform_from_transcripts(agent_idx: int, population:list, game: Game, payoff_matrix, n_games: int, *kwargs):
+def run_PSRO_from_transcripts(agent_idx: int, population: list, game: Game, payoff_matrix, n_games: int, opp_distribution_fn, **kwargs):
     """
-    This algorithm samples opponents uniformly from all agents and plays n_games before updating
+    Samples n_games opponents according to the provided population distribution fn and
+    collects transcripts.
     """
+    dist = opp_distribution_fn(agent_idx, payoff_matrix)
     transcripts = []
     for _ in trange(n_games):
-        rand_idx = np.random.randint(len(population))
+        rand_idx = np.random.choice(len(population), p=dist)
         u = population[agent_idx]
         v = population[rand_idx]
         transcripts.append(game.play(u, v, return_transcript=True))
     return game.improve_from_transcripts(population[agent_idx], transcripts)
 
-def run_PSRO_uniform_weaker(agent_idx: int, population: list, game: Game, payoff_matrix, **kwargs):
-    """
-    This algorithm samples opponents uniformly from the weaker agents
-    """
-    # Weaker = population[i] that agent_idx has positive payoff against
-    weaker_indices = [i for i in range(len(population)) if i != agent_idx and payoff_matrix[agent_idx, i] > 0]
+## -------------------------------------------------------------------- ##
+"""
+NOTE(Faraz): The following functions accomodate the old interface by composing 
+run_PSRO with a specific opp_distribution_fn to recreate the old interface 
+such as to not break old code 
+"""
+def run_self_play(agent_idx: int, population: list, game: "Game", payoff_matrix: "np.ndarray", **kwargs):
+    return run_PSRO(agent_idx, population, game, payoff_matrix, opp_distribution_fn=get_self_play_distribution, **kwargs)
 
-    rand_weaker_idx = np.random.choice(weaker_indices) if weaker_indices else agent_idx
+def run_PSRO_uniform(agent_idx: int, population: list, game: "Game", payoff_matrix: "np.ndarray", **kwargs):
+    return run_PSRO(agent_idx, population, game, payoff_matrix, opp_distribution_fn=get_uniform_distribution, **kwargs)
 
-    return game.improve(population[agent_idx], population[rand_weaker_idx], **kwargs)
+def run_PSRO_uniform_weaker(agent_idx: int, population: list, game: "Game", payoff_matrix: "np.ndarray", **kwargs):
+    return run_PSRO(agent_idx, population, game, payoff_matrix, opp_distribution_fn=get_uniform_weaker_distribution, **kwargs)
 
-def run_PSRO_uniform_stronger(agent_idx: int, population: list, game: Game, payoff_matrix, **kwargs):
-    """
-    This algorithm samples opponents uniformly from the stronger agents
-    """
-    # Stronger = population[i] that agent_idx has negative payoff against
-    stronger_indices = [i for i in range(len(population)) if i != agent_idx and payoff_matrix[agent_idx, i] < 0]
+def run_PSRO_uniform_stronger(agent_idx: int, population: list, game: "Game", payoff_matrix: "np.ndarray", **kwargs):
+    return run_PSRO(agent_idx, population, game, payoff_matrix, opp_distribution_fn=get_uniform_stronger_distribution, **kwargs)
 
-    rand_stronger_idx = np.random.choice(stronger_indices) if stronger_indices else agent_idx
+## -------------------------------------------------------------------- ##
 
-    return game.improve(population[agent_idx], population[rand_stronger_idx], **kwargs)
+def run_self_play_from_transcripts(agent_idx: int, population: list, game: "Game", payoff_matrix: "np.ndarray", n_games: int, **kwargs):
+    return run_PSRO_from_transcripts(agent_idx, population, game, payoff_matrix, n_games, opp_distribution_fn=get_self_play_distribution, **kwargs)
+
+def run_PSRO_uniform_from_transcripts(agent_idx: int, population: list, game: "Game", payoff_matrix: "np.ndarray", n_games: int, **kwargs):
+    return run_PSRO_from_transcripts(agent_idx, population, game, payoff_matrix, n_games, opp_distribution_fn=get_uniform_distribution, **kwargs)
+
+def run_PSRO_uniform_weaker_from_transcripts(agent_idx: int, population: list, game: "Game", payoff_matrix: "np.ndarray", n_games: int, **kwargs):
+    return run_PSRO_from_transcripts(agent_idx, population, game, payoff_matrix, n_games, opp_distribution_fn=get_uniform_weaker_distribution, **kwargs)
+
+def run_PSRO_uniform_stronger_from_transcripts(agent_idx: int, population: list, game: "Game", payoff_matrix: "np.ndarray", n_games: int, **kwargs):
+    return run_PSRO_from_transcripts(agent_idx, population, game, payoff_matrix, n_games, opp_distribution_fn=get_uniform_stronger_distribution, **kwargs)
+
+## -------------------------------------------------------------------- ##
 
 def train_population_from_last_agent(initial_population, update_rule, game: Game, *, n_iters: int, n_games_per_empirical_payoff: int, **kwargs):
     import numpy as np
@@ -149,7 +195,27 @@ def train_population_from_last_agent(initial_population, update_rule, game: Game
         )
         population.append(new_agent)
 
-    return population
+    return population, payoff_matrix
+
+def train_population_from_random_agent(initial_population, update_rule, game: Game, *, n_iters: int, n_games_per_empirical_payoff: int, **kwargs):
+    import numpy as np
+    population = list(initial_population)
+    payoff_matrix = None
+
+    for _ in range(n_iters):
+        # Recompute payoff matrix only when the population has changed (agent added)
+        payoff_matrix = compute_empirical_payoff_matrix(population, game, parallel=True, cached_payoff_matrix=payoff_matrix, n_games=n_games_per_empirical_payoff)
+        new_agent = update_rule(
+            agent_idx = np.random.randint(0, len(population)), 
+            population = population, 
+            game = game,
+            payoff_matrix = payoff_matrix,
+            n_games=10,
+            **kwargs
+        )
+        population.append(new_agent)
+
+    return population, payoff_matrix
 
 
 if __name__ == "__main__":
@@ -158,20 +224,21 @@ if __name__ == "__main__":
     from games.disc.disc_game import DiscGame, get_RPS_triangle
     from games.disc.disc_game_vis import plot_image
 
-    # game = DiscGame()
-    # initial_population = get_RPS_triangle()
-    # # final_population = train_population_from_last_agent(initial_population, run_self_play, game, n_iters=4, n_games_per_empirical_payoff=3)
-    # final_population = train_population_from_last_agent(initial_population, run_PSRO_uniform_stronger, game, n_iters=8, n_games_per_empirical_payoff=4, learning_rate=.1)
+    game = DiscGame()
+    initial_population = get_RPS_triangle()
+    # final_population, payoff_matrix = train_population_from_last_agent(initial_population, run_self_play, game, n_iters=4, n_games_per_empirical_payoff=3)
+    # final_population, payoff_matrix = train_population_from_last_agent(initial_population, run_PSRO_uniform_weaker, game, n_iters=80, n_games_per_empirical_payoff=4, learning_rate=.1)
+    final_population, payoff_matrix = train_population_from_random_agent(initial_population, run_PSRO_uniform_weaker, game, n_iters=80, n_games_per_empirical_payoff=4, learning_rate=.5)
 
 
-    from games.llms.llm2 import LLMRockPaperScissors, rock_prompt, paper_scissors_prompt, example_population 
-    from games.disc.disc_game import rps_to_disc
+    # from games.llms.llm2 import LLMRockPaperScissors, rock_prompt, paper_scissors_prompt, example_population 
+    # from games.disc.disc_game import rps_to_disc
 
-    game = LLMRockPaperScissors()
-    # Initial population: rock, paper-or-scissors, fully random
-    # initial_population = [rock_prompt, paper_scissors_prompt]
-    # final_population = train_population_from_last_agent(example_population, run_self_play, game, n_iters=4, n_games_per_empirical_payoff=5)
-    final_population = train_population_from_last_agent(example_population, run_PSRO_uniform_from_transcripts, game, n_iters=4, n_games_per_empirical_payoff=5)
+    # game = LLMRockPaperScissors()
+    # # Initial population: rock, paper-or-scissors, fully random
+    # # initial_population = [rock_prompt, paper_scissors_prompt]
+    # # final_population, payoff_matrix = train_population_from_last_agent(example_population, run_self_play, game, n_iters=4, n_games_per_empirical_payoff=5)
+    # final_population, payoff_matrix = train_population_from_last_agent(example_population, run_PSRO_uniform_weaker_from_transcripts, game, n_iters=4, n_games_per_empirical_payoff=5)
 
     # A = compute_empirical_payoff_matrix_serial(example_population, game, n_games=10)
     # print(A)
@@ -185,7 +252,7 @@ if __name__ == "__main__":
 
 
     # final_population = [rps_to_disc(empirical_rps_distribution(u, n_games=10)) for u in final_population]
-    # # Plot the final population using plot_image
+    # Plot the final population using plot_image
     # img = plot_image(final_population)
     # img.show()
 
