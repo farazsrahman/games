@@ -2106,14 +2106,15 @@ def _handle_interactive_egs(state):
     st.subheader(f"📊 Interactive EGS Computation")
     progress_pct = (current_idx / len(comparison_list)) * 100
     st.progress(progress_pct / 100)
-    st.caption(f"Comparison {current_idx + 1} of {len(comparison_list)}: Agent {i+1} vs Agent {j+1}")
+    st.caption(f"Comparison {current_idx + 1} of {len(comparison_list)}: Agent A vs Agent B")
     
     st.markdown(f"**Question:** {question}")
+    st.info("💡 **Blind Comparison:** The agents are labeled A and B to reduce bias. Please evaluate based on answer quality alone.")
     
     col_a, col_b = st.columns(2)
     
     with col_a:
-        st.markdown(f"### Agent {i+1} Answer")
+        st.markdown(f"### Agent A Answer")
         # Render markdown
         try:
             import markdown
@@ -2125,13 +2126,13 @@ def _handle_interactive_egs(state):
             unsafe_allow_html=True
         )
         
-        if st.button(f"✅ Prefer Agent {i+1}", type="primary", use_container_width=True, key=f"egs_prefer_{i}_{j}_{current_idx}_a"):
+        if st.button(f"✅ Prefer Agent A", type="primary", use_container_width=True, key=f"egs_prefer_{i}_{j}_{current_idx}_a"):
             state["egs_comparisons"].append((i, j, question, answer_i, answer_j, "A"))
             state["egs_comparison_idx"] = current_idx + 1
             st.rerun()
     
     with col_b:
-        st.markdown(f"### Agent {j+1} Answer")
+        st.markdown(f"### Agent B Answer")
         # Render markdown
         try:
             import markdown
@@ -2143,7 +2144,7 @@ def _handle_interactive_egs(state):
             unsafe_allow_html=True
         )
         
-        if st.button(f"✅ Prefer Agent {j+1}", type="primary", use_container_width=True, key=f"egs_prefer_{i}_{j}_{current_idx}_b"):
+        if st.button(f"✅ Prefer Agent B", type="primary", use_container_width=True, key=f"egs_prefer_{i}_{j}_{current_idx}_b"):
             state["egs_comparisons"].append((i, j, question, answer_i, answer_j, "B"))
             state["egs_comparison_idx"] = current_idx + 1
             st.rerun()
