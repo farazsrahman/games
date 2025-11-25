@@ -1298,248 +1298,78 @@ def render_llm_competition_tab():
                 with st.spinner("Calling LLM API to generate responses (this may take 30-60 seconds)..."):
                     _start_next_game(state)
                 state["generating_answers"] = False
-                if state.get("waiting_for_feedback"):
+                
+                # If simulated user mode, automatically process feedback without asking user
+                if state.get("use_simulated_user", False) and state.get("waiting_for_feedback", False):
+                    # Automatically simulate user choice
+                    from games.llms.llm_competition import simulate_user_choice
+                    question = state.get("current_question")
+                    answer_a = state.get("current_answer_a")
+                    answer_b = state.get("current_answer_b")
+                    if question and answer_a and answer_b:
+                        # Simulate user choice
+                        user_choice = simulate_user_choice(
+                            answer_a, answer_b, 
+                            state["game"].user_prefs, 
+                            question
+                        )
+                        # Process feedback automatically
+                        state["user_choice"] = user_choice
+                        state["processing_feedback"] = True
+                        state["feedback_given"] = True
+                        st.rerun()
+                elif state.get("waiting_for_feedback"):
                     st.rerun()
         
-        elif state.get("waiting_for_feedback"):
+        elif state.get("waiting_for_feedback") and not state.get("use_simulated_user", False):
             st.subheader("⏳ Waiting for Your Feedback")
             
             if state.get("current_question") and state.get("current_answer_a") and state.get("current_answer_b"):
                 st.markdown(f"**Question:** {state['current_question']}")
                 
+                # Buttons at the top
+                st.markdown("---")
+                col_btn1, col_btn2, col_btn3 = st.columns(3)
+                button_disabled = state.get("feedback_given", False) or state.get("processing_feedback", False)
+                
+                with col_btn1:
+                    if st.button("✅ Prefer Answer A", type="primary", use_container_width=True, 
+                                key="prefer_a", disabled=button_disabled):
+                        state["feedback_given"] = True
+                        state["processing_feedback"] = True
+                        state["user_choice"] = "A"
+                        st.rerun()
+                
+                with col_btn2:
+                    if st.button("🤝 Tie / No Preference", use_container_width=True, 
+                                key="prefer_tie", disabled=button_disabled):
+                        state["feedback_given"] = True
+                        state["processing_feedback"] = True
+                        state["user_choice"] = "TIE"
+                        st.rerun()
+                
+                with col_btn3:
+                    if st.button("✅ Prefer Answer B", type="primary", use_container_width=True, 
+                                key="prefer_b", disabled=button_disabled):
+                        state["feedback_given"] = True
+                        state["processing_feedback"] = True
+                        state["user_choice"] = "B"
+                        st.rerun()
+                
+                st.markdown("---")
+                
+                # Answers displayed below buttons without boxes, using native markdown
                 col_a, col_b = st.columns(2)
                 
                 with col_a:
                     st.markdown("### Answer A")
-                    # Render markdown properly inside scrollable box
-                    answer_a_text = state["current_answer_a"]
-                    
-                    # Use markdown library if available for proper rendering
-                    try:
-                        import markdown
-                        answer_a_html = markdown.markdown(
-                            answer_a_text, 
-                            extensions=['fenced_code', 'nl2br', 'tables', 'codehilite']
-                        )
-                    except (ImportError, AttributeError):
-                        # Fallback: convert markdown to HTML manually
-                        import html
-                        import re
-                        text = answer_a_text
-                        
-                        # Save and remove code blocks first (before any processing)
-                        code_blocks = []
-                        def save_code_block(match):
-                            code_content = match.group(1) if match.lastindex else match.group(0)
-                            # Remove the ``` markers
-                            code_content = re.sub(r'^```[\w]*\n?', '', code_content, flags=re.MULTILINE)
-                            code_content = re.sub(r'```$', '', code_content, flags=re.MULTILINE)
-                            code_blocks.append(html.escape(code_content.strip()))
-                            return f"__CODE_BLOCK_{len(code_blocks)-1}__"
-                        
-                        # Extract code blocks (triple backticks)
-                        text = re.sub(r'```([\w]*)\n?(.*?)```', save_code_block, text, flags=re.DOTALL)
-                        
-                        # Now escape the rest of the text (but not code blocks)
-                        # We'll escape after processing markdown
-                        
-                        # Inline code (single backticks) - escape content
-                        def escape_inline_code(match):
-                            return f'<code>{html.escape(match.group(1))}</code>'
-                        text = re.sub(r'`([^`\n]+)`', escape_inline_code, text)
-                        
-                        # Bold (**text**)
-                        def escape_bold(match):
-                            return f'<strong>{html.escape(match.group(1))}</strong>'
-                        text = re.sub(r'\*\*([^*\n]+)\*\*', escape_bold, text)
-                        
-                        # Italic (*text* but not **text**)
-                        def escape_italic(match):
-                            return f'<em>{html.escape(match.group(1))}</em>'
-                        text = re.sub(r'(?<!\*)\*([^*\n]+)\*(?!\*)', escape_italic, text)
-                        text = re.sub(r'_([^_\n]+)_', escape_italic, text)
-                        
-                        # Headers
-                        def escape_header(match, tag):
-                            return f'<{tag}>{html.escape(match.group(1))}</{tag}>'
-                        text = re.sub(r'^### (.+)$', lambda m: escape_header(m, 'h3'), text, flags=re.MULTILINE)
-                        text = re.sub(r'^## (.+)$', lambda m: escape_header(m, 'h2'), text, flags=re.MULTILINE)
-                        text = re.sub(r'^# (.+)$', lambda m: escape_header(m, 'h1'), text, flags=re.MULTILINE)
-                        
-                        # Lists (unordered) - process line by line
-                        lines = text.split('\n')
-                        in_list = False
-                        result_lines = []
-                        for line in lines:
-                            if re.match(r'^\s*[-*+]\s+', line):
-                                if not in_list:
-                                    result_lines.append('<ul>')
-                                    in_list = True
-                                item_text = re.sub(r'^\s*[-*+]\s+', '', line)
-                                result_lines.append(f'<li>{html.escape(item_text)}</li>')
-                            else:
-                                if in_list:
-                                    result_lines.append('</ul>')
-                                    in_list = False
-                                # Escape remaining text that hasn't been processed
-                                if line and not line.startswith('<'):
-                                    result_lines.append(html.escape(line))
-                                else:
-                                    result_lines.append(line)
-                        if in_list:
-                            result_lines.append('</ul>')
-                        text = '\n'.join(result_lines)
-                        
-                        # Escape any remaining unprocessed text (but preserve HTML tags we created)
-                        # This is tricky - we need to escape text but not our HTML tags
-                        # For now, assume we've handled most cases above
-                        
-                        # Restore code blocks
-                        for i, code in enumerate(code_blocks):
-                            text = text.replace(f"__CODE_BLOCK_{i}__", f'<pre><code>{code}</code></pre>')
-                        
-                        # Convert double newlines to paragraphs
-                        text = re.sub(r'\n\n+', '</p><p>', text)
-                        # Convert single newlines to line breaks (but not inside code blocks)
-                        text = re.sub(r'(?<!</code>)\n(?!<code>)', '<br>', text)
-                        answer_a_html = f'<p>{text}</p>'
-                    
-                    st.markdown(
-                        f'<div class="answer-box answer-box-a">{answer_a_html}</div>',
-                        unsafe_allow_html=True
-                    )
-                    
-                    # Button directly under Answer A - disabled if already processed
-                    button_disabled = state.get("feedback_given", False) or state.get("processing_feedback", False)
-                    if st.button("✅ Prefer Answer A", type="primary", use_container_width=True, 
-                                key="prefer_a", disabled=button_disabled):
-                        # Set flags immediately to prevent spamming
-                        state["feedback_given"] = True
-                        state["processing_feedback"] = True
-                        state["user_choice"] = "A"  # Store choice for processing
-                        st.rerun()
+                    # Use Streamlit's native markdown rendering - much simpler and better
+                    st.markdown(state["current_answer_a"])
                 
                 with col_b:
                     st.markdown("### Answer B")
-                    # Render markdown properly inside scrollable box
-                    answer_b_text = state["current_answer_b"]
-                    
-                    # Use markdown library if available for proper rendering
-                    try:
-                        import markdown
-                        answer_b_html = markdown.markdown(
-                            answer_b_text, 
-                            extensions=['fenced_code', 'nl2br', 'tables', 'codehilite']
-                        )
-                    except (ImportError, AttributeError):
-                        # Fallback: convert markdown to HTML manually
-                        import html
-                        import re
-                        text = answer_b_text
-                        
-                        # Save and remove code blocks first (before any processing)
-                        code_blocks = []
-                        def save_code_block(match):
-                            code_content = match.group(1) if match.lastindex else match.group(0)
-                            # Remove the ``` markers
-                            code_content = re.sub(r'^```[\w]*\n?', '', code_content, flags=re.MULTILINE)
-                            code_content = re.sub(r'```$', '', code_content, flags=re.MULTILINE)
-                            code_blocks.append(html.escape(code_content.strip()))
-                            return f"__CODE_BLOCK_{len(code_blocks)-1}__"
-                        
-                        # Extract code blocks (triple backticks)
-                        text = re.sub(r'```([\w]*)\n?(.*?)```', save_code_block, text, flags=re.DOTALL)
-                        
-                        # Now escape the rest of the text (but not code blocks)
-                        # We'll escape after processing markdown
-                        
-                        # Inline code (single backticks) - escape content
-                        def escape_inline_code(match):
-                            return f'<code>{html.escape(match.group(1))}</code>'
-                        text = re.sub(r'`([^`\n]+)`', escape_inline_code, text)
-                        
-                        # Bold (**text**)
-                        def escape_bold(match):
-                            return f'<strong>{html.escape(match.group(1))}</strong>'
-                        text = re.sub(r'\*\*([^*\n]+)\*\*', escape_bold, text)
-                        
-                        # Italic (*text* but not **text**)
-                        def escape_italic(match):
-                            return f'<em>{html.escape(match.group(1))}</em>'
-                        text = re.sub(r'(?<!\*)\*([^*\n]+)\*(?!\*)', escape_italic, text)
-                        text = re.sub(r'_([^_\n]+)_', escape_italic, text)
-                        
-                        # Headers
-                        def escape_header(match, tag):
-                            return f'<{tag}>{html.escape(match.group(1))}</{tag}>'
-                        text = re.sub(r'^### (.+)$', lambda m: escape_header(m, 'h3'), text, flags=re.MULTILINE)
-                        text = re.sub(r'^## (.+)$', lambda m: escape_header(m, 'h2'), text, flags=re.MULTILINE)
-                        text = re.sub(r'^# (.+)$', lambda m: escape_header(m, 'h1'), text, flags=re.MULTILINE)
-                        
-                        # Lists (unordered) - process line by line
-                        lines = text.split('\n')
-                        in_list = False
-                        result_lines = []
-                        for line in lines:
-                            if re.match(r'^\s*[-*+]\s+', line):
-                                if not in_list:
-                                    result_lines.append('<ul>')
-                                    in_list = True
-                                item_text = re.sub(r'^\s*[-*+]\s+', '', line)
-                                result_lines.append(f'<li>{html.escape(item_text)}</li>')
-                            else:
-                                if in_list:
-                                    result_lines.append('</ul>')
-                                    in_list = False
-                                # Escape remaining text that hasn't been processed
-                                if line and not line.startswith('<'):
-                                    result_lines.append(html.escape(line))
-                                else:
-                                    result_lines.append(line)
-                        if in_list:
-                            result_lines.append('</ul>')
-                        text = '\n'.join(result_lines)
-                        
-                        # Escape any remaining unprocessed text (but preserve HTML tags we created)
-                        # This is tricky - we need to escape text but not our HTML tags
-                        # For now, assume we've handled most cases above
-                        
-                        # Restore code blocks
-                        for i, code in enumerate(code_blocks):
-                            text = text.replace(f"__CODE_BLOCK_{i}__", f'<pre><code>{code}</code></pre>')
-                        
-                        # Convert double newlines to paragraphs
-                        text = re.sub(r'\n\n+', '</p><p>', text)
-                        # Convert single newlines to line breaks (but not inside code blocks)
-                        text = re.sub(r'(?<!</code>)\n(?!<code>)', '<br>', text)
-                        answer_b_html = f'<p>{text}</p>'
-                    
-                    st.markdown(
-                        f'<div class="answer-box answer-box-b">{answer_b_html}</div>',
-                        unsafe_allow_html=True
-                    )
-                    
-                    # Button directly under Answer B - disabled if already processed
-                    button_disabled = state.get("feedback_given", False) or state.get("processing_feedback", False)
-                    if st.button("✅ Prefer Answer B", type="primary", use_container_width=True, 
-                                key="prefer_b", disabled=button_disabled):
-                        # Set flags immediately to prevent spamming
-                        state["feedback_given"] = True
-                        state["processing_feedback"] = True
-                        state["user_choice"] = "B"  # Store choice for processing
-                        st.rerun()
-                
-                # Tie button centered below both
-                col_tie1, col_tie2, col_tie3 = st.columns([1, 1, 1])
-                with col_tie2:
-                    button_disabled = state.get("feedback_given", False) or state.get("processing_feedback", False)
-                    if st.button("🤝 Tie / No Preference", use_container_width=True, 
-                                key="prefer_tie", disabled=button_disabled):
-                        # Set flags immediately to prevent spamming
-                        state["feedback_given"] = True
-                        state["processing_feedback"] = True
-                        state["user_choice"] = "TIE"  # Store choice for processing
-                        st.rerun()
+                    # Use Streamlit's native markdown rendering - much simpler and better
+                    st.markdown(state["current_answer_b"])
         
         elif len(state["population"]) < state["n_agents"]:
             # Auto-start next game if not waiting for feedback and not already generating
@@ -2248,51 +2078,42 @@ def _handle_interactive_egs(state):
     st.markdown(f"**Question:** {question}")
     st.info("💡 **Blind Comparison:** The agents are labeled A and B to reduce bias. Please evaluate based on answer quality alone.")
     
-    col_a, col_b = st.columns(2)
+    # Buttons at the top
+    st.markdown("---")
+    col_btn1, col_btn2, col_btn3 = st.columns(3)
     
-    with col_a:
-        st.markdown(f"### Agent A Answer")
-        # Render markdown
-        try:
-            import markdown
-            answer_i_html = markdown.markdown(answer_i, extensions=['fenced_code', 'nl2br', 'tables'])
-        except (ImportError, AttributeError):
-            answer_i_html = answer_i.replace('\n', '<br>')
-        st.markdown(
-            f'<div class="answer-box answer-box-a">{answer_i_html}</div>',
-            unsafe_allow_html=True
-        )
-        
-        if st.button(f"✅ Prefer Agent A", type="primary", use_container_width=True, key=f"egs_prefer_{i}_{j}_{current_idx}_a"):
+    with col_btn1:
+        if st.button("✅ Prefer Agent A", type="primary", use_container_width=True, key=f"egs_prefer_{i}_{j}_{current_idx}_a"):
             state["egs_comparisons"].append((i, j, question, answer_i, answer_j, "A"))
             state["egs_comparison_idx"] = current_idx + 1
             st.rerun()
     
-    with col_b:
-        st.markdown(f"### Agent B Answer")
-        # Render markdown
-        try:
-            import markdown
-            answer_j_html = markdown.markdown(answer_j, extensions=['fenced_code', 'nl2br', 'tables'])
-        except (ImportError, AttributeError):
-            answer_j_html = answer_j.replace('\n', '<br>')
-        st.markdown(
-            f'<div class="answer-box answer-box-b">{answer_j_html}</div>',
-            unsafe_allow_html=True
-        )
-        
-        if st.button(f"✅ Prefer Agent B", type="primary", use_container_width=True, key=f"egs_prefer_{i}_{j}_{current_idx}_b"):
-            state["egs_comparisons"].append((i, j, question, answer_i, answer_j, "B"))
-            state["egs_comparison_idx"] = current_idx + 1
-            st.rerun()
-    
-    # Tie button
-    col_tie1, col_tie2, col_tie3 = st.columns([1, 1, 1])
-    with col_tie2:
+    with col_btn2:
         if st.button("🤝 Tie / No Preference", use_container_width=True, key=f"egs_prefer_{i}_{j}_{current_idx}_tie"):
             state["egs_comparisons"].append((i, j, question, answer_i, answer_j, "TIE"))
             state["egs_comparison_idx"] = current_idx + 1
             st.rerun()
+    
+    with col_btn3:
+        if st.button("✅ Prefer Agent B", type="primary", use_container_width=True, key=f"egs_prefer_{i}_{j}_{current_idx}_b"):
+            state["egs_comparisons"].append((i, j, question, answer_i, answer_j, "B"))
+            state["egs_comparison_idx"] = current_idx + 1
+            st.rerun()
+    
+    st.markdown("---")
+    
+    # Answers displayed below buttons without boxes, using native markdown
+    col_a, col_b = st.columns(2)
+    
+    with col_a:
+        st.markdown("### Agent A Answer")
+        # Use Streamlit's native markdown rendering
+        st.markdown(answer_i)
+    
+    with col_b:
+        st.markdown("### Agent B Answer")
+        # Use Streamlit's native markdown rendering
+        st.markdown(answer_j)
 
 
 def render_comparison_tab():

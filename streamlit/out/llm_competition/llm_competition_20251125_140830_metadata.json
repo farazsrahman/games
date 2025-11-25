@@ -1,0 +1,31 @@
+{
+  "timestamp": "20251125_140830",
+  "experiment_params": {
+    "n_agents": 5,
+    "n_games_per_agent": 1,
+    "improvement_method": "weaker",
+    "training_history_length": 3,
+    "total_games_played": 3
+  },
+  "n_agents": 5,
+  "user_preferences": {
+    "sociability": 0.6394267984578837,
+    "knowledge_depth": 0.025010755222666936,
+    "conciseness": 0.27502931836911926,
+    "formality": 0.22321073814882275,
+    "creativity": 0.7364712141640124,
+    "accuracy": 0.6766994874229113,
+    "empathy": 0.8921795677048454
+  },
+  "gamescape_stats": {
+    "min": -1.0,
+    "max": 1.0,
+    "mean": 0.0,
+    "std": 0.7180219742846006
+  },
+  "files": {
+    "population": "out/llm_competition/llm_competition_20251125_140830_population.pkl",
+    "matrix": "out/llm_competition/llm_competition_20251125_140830_egs_matrix.npy",
+    "preferences": "out/llm_competition/llm_competition_20251125_140830_user_prefs.json"
+  }
+}
