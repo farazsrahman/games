@@ -1,0 +1,62 @@
+================================================================================
+LLM Competition Experiment Information
+================================================================================
+
+Experiment ID: llm_competition_20251125_140830
+Timestamp: 20251125_140830
+Date: 2025-11-25 14:08:30
+
+--------------------------------------------------------------------------------
+EXPERIMENT PARAMETERS
+--------------------------------------------------------------------------------
+
+Number of Agents: 5
+Improvement Method: weaker
+Games per Agent (for improvement): 1
+Questions per Agent Pair (for EGS matrix): 2
+User Mode: INTERACTIVE
+  - Simulated: Uses automated user preference simulation
+  - Interactive: Requires human feedback for each comparison
+
+--------------------------------------------------------------------------------
+TRAINING STATISTICS
+--------------------------------------------------------------------------------
+
+Total Training History Entries: 3
+Total Games Played: 3
+
+--------------------------------------------------------------------------------
+EGS MATRIX STATISTICS
+--------------------------------------------------------------------------------
+
+Min Payoff: -1.0
+Max Payoff: 1.0
+Mean Payoff: 0.0
+Std Dev Payoff: 0.7180219742846006
+
+--------------------------------------------------------------------------------
+USER PREFERENCES
+--------------------------------------------------------------------------------
+
+Sociability: 0.6394
+Knowledge Depth: 0.0250
+Conciseness: 0.2750
+Formality: 0.2232
+Creativity: 0.7365
+Accuracy: 0.6767
+Empathy: 0.8922
+
+--------------------------------------------------------------------------------
+FILE LOCATIONS
+--------------------------------------------------------------------------------
+
+Experiment Directory: out/llm_competition/agents_5_method_weaker_mode_interactive_questions_2
+Subfolder: agents_5_method_weaker_mode_interactive_questions_2
+
+--------------------------------------------------------------------------------
+ADDITIONAL NOTES
+--------------------------------------------------------------------------------
+
+[Add any additional notes about this experiment here]
+
+================================================================================

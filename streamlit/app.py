@@ -986,14 +986,20 @@ def render_llm_competition_tab():
     st.subheader("📂 Load Previous Experiment")
     
     with st.expander("Load a previously saved experiment", expanded=False):
-        saved_experiments = list_saved_experiments(save_dir="out/llm_competition")
+        # Use absolute path relative to project root (where streamlit is typically run from)
+        import os
+        from pathlib import Path
+        # Get project root (parent of streamlit directory)
+        project_root = Path(__file__).parent.parent
+        save_dir = str(project_root / "out" / "llm_competition")
+        saved_experiments = list_saved_experiments(save_dir=save_dir)
         
         if not saved_experiments:
             st.info("No saved experiments found in the `out/llm_competition/` directory.")
         else:
             st.info(f"Found {len(saved_experiments)} saved experiment(s).")
             
-            # Create selection dropdown
+            # Create selection dropdown with experiment parameters
             experiment_options = {}
             for exp in saved_experiments:
                 timestamp = exp["timestamp"]
@@ -1005,6 +1011,22 @@ def render_llm_competition_tab():
                 except:
                     formatted_time = timestamp
                 
+                # Build descriptive label with parameters
+                parts = []
+                n_agents = exp.get("n_agents", "unknown")
+                if n_agents != "unknown" and n_agents is not None:
+                    parts.append(f"{n_agents} agents")
+                improvement_method = exp.get("improvement_method", "unknown")
+                if improvement_method != "unknown" and improvement_method is not None:
+                    parts.append(improvement_method)
+                user_mode = exp.get("user_mode", "unknown")
+                if user_mode != "unknown" and user_mode is not None:
+                    mode_display = "🤖 Simulated" if user_mode == "simulated" else "👤 Interactive"
+                    parts.append(mode_display)
+                n_questions = exp.get("n_questions_per_pair", "unknown")
+                if n_questions != "unknown" and n_questions is not None:
+                    parts.append(f"{n_questions} questions")
+                
                 # Show which files are available
                 files_status = []
                 if exp["has_population"]:
@@ -1014,7 +1036,8 @@ def render_llm_competition_tab():
                 if exp["has_prefs"]:
                     files_status.append("Preferences")
                 
-                label = f"{formatted_time} ({', '.join(files_status)})"
+                params_str = " | ".join(parts) if parts else "Unknown params"
+                label = f"{formatted_time} | {params_str} | ({', '.join(files_status)})"
                 experiment_options[label] = exp["base_name"]
             
             selected_label = st.selectbox(
@@ -1033,7 +1056,12 @@ def render_llm_competition_tab():
                 if st.button("📥 Load Experiment", type="primary", use_container_width=True, key="load_experiment_btn"):
                     with st.spinner("Loading experiment..."):
                         try:
-                            result = load_experiment_results(selected_base_name, save_dir="out/llm_competition")
+                            # Use absolute path
+                            import os
+                            from pathlib import Path
+                            project_root = Path(__file__).parent.parent
+                            save_dir = str(project_root / "out" / "llm_competition")
+                            result = load_experiment_results(selected_base_name, save_dir=save_dir)
                             
                             if result["loaded_successfully"]:
                                 # Populate state with loaded data
@@ -1045,10 +1073,11 @@ def render_llm_competition_tab():
                                 game = LLMCompetition(user_prefs=loaded_prefs)
                                 state["game"] = game
                                 
-                                # Store metadata and visualization files
+                                # Store metadata, visualization files, and experiment info
                                 state["loaded_experiment_metadata"] = result["metadata"]
                                 state["loaded_experiment_name"] = selected_base_name
                                 state["loaded_experiment_viz_files"] = result.get("visualization_files", [])
+                                state["loaded_experiment_info"] = result.get("experiment_info")
                                 
                                 # Mark as loaded (not initialized for training, but ready for viewing)
                                 state["experiment_loaded"] = True
@@ -1449,21 +1478,27 @@ def render_llm_competition_tab():
                         with st.spinner("Saving experiment results..."):
                             try:
                                 # Prepare experiment parameters
+                                user_mode = "simulated" if state.get("use_simulated_user", False) else "interactive"
                                 experiment_params = {
                                     "n_agents": state["n_agents"],
                                     "n_games_per_agent": state["n_games_per_agent"],
                                     "improvement_method": state["improvement_method"],
+                                    "n_questions_per_pair": state.get("n_questions_per_pair", 5),
+                                    "user_mode": user_mode,  # Track simulated vs interactive
                                     "training_history_length": len(state.get("training_history", [])),
                                     "total_games_played": state.get("current_game_idx", 0)
                                 }
                                 
-                                # Save results
+                                # Save results - use absolute path
+                                project_root = Path(__file__).parent.parent
+                                save_dir = str(project_root / "out" / "llm_competition")
+                                
                                 base_name = save_experiment_results(
                                     population=state["population"],
                                     egs_matrix=state["egs_matrix"],
                                     game=state["game"],
                                     experiment_params=experiment_params,
-                                    save_dir="out/llm_competition",
+                                    save_dir=save_dir,
                                     prefix="llm_competition"
                                 )
                                 
@@ -1471,25 +1506,41 @@ def render_llm_competition_tab():
                                 try:
                                     visualize_gamescape(
                                         egs_matrix=state["egs_matrix"],
-                                        save_dir="out/llm_competition",
+                                        save_dir=save_dir,
                                         prefix=base_name
                                     )
+                                    # Extract subfolder from base_name if present
+                                    if "/" in base_name:
+                                        subfolder, filename = base_name.rsplit("/", 1)
+                                        save_location = f"`out/llm_competition/{subfolder}/`"
+                                    else:
+                                        save_location = "`out/llm_competition/`"
+                                    
                                     st.success(f"✅ **Results saved successfully!**\n\n"
-                                             f"**Base name:** `{base_name}`\n\n"
-                                             f"**Files saved to `out/llm_competition/` directory:**\n"
-                                             f"- `{base_name}_population.pkl` - All agent strategies\n"
-                                             f"- `{base_name}_egs_matrix.npy` - Gamescape matrix\n"
-                                             f"- `{base_name}_user_prefs.json` - User preferences\n"
-                                             f"- `{base_name}_metadata.json` - Experiment metadata\n"
-                                             f"- `{base_name}_egs_*.png` - Visualization plots")
+                                              f"**Base name:** `{base_name}`\n\n"
+                                              f"**Files saved to {save_location}:**\n"
+                                              f"- `{base_name.split('/')[-1]}_population.pkl` - All agent strategies\n"
+                                              f"- `{base_name.split('/')[-1]}_egs_matrix.npy` - Gamescape matrix\n"
+                                              f"- `{base_name.split('/')[-1]}_user_prefs.json` - User preferences\n"
+                                              f"- `{base_name.split('/')[-1]}_metadata.json` - Experiment metadata\n"
+                                              f"- `{base_name.split('/')[-1]}_experiment_info.txt` - Detailed experiment information\n"
+                                              f"- `{base_name.split('/')[-1]}_egs_*.png` - Visualization plots")
                                 except Exception as viz_error:
+                                    # Extract subfolder from base_name if present
+                                    if "/" in base_name:
+                                        subfolder, filename = base_name.rsplit("/", 1)
+                                        save_location = f"`out/llm_competition/{subfolder}/`"
+                                    else:
+                                        save_location = "`out/llm_competition/`"
+                                    
                                     st.success(f"✅ **Results saved successfully!**\n\n"
                                              f"**Base name:** `{base_name}`\n\n"
-                                             f"**Files saved to `out/llm_competition/` directory:**\n"
-                                             f"- `{base_name}_population.pkl` - All agent strategies\n"
-                                             f"- `{base_name}_egs_matrix.npy` - Gamescape matrix\n"
-                                             f"- `{base_name}_user_prefs.json` - User preferences\n"
-                                             f"- `{base_name}_metadata.json` - Experiment metadata")
+                                             f"**Files saved to {save_location}:**\n"
+                                             f"- `{base_name.split('/')[-1]}_population.pkl` - All agent strategies\n"
+                                             f"- `{base_name.split('/')[-1]}_egs_matrix.npy` - Gamescape matrix\n"
+                                             f"- `{base_name.split('/')[-1]}_user_prefs.json` - User preferences\n"
+                                             f"- `{base_name.split('/')[-1]}_metadata.json` - Experiment metadata\n"
+                                             f"- `{base_name.split('/')[-1]}_experiment_info.txt` - Detailed experiment information")
                                     st.warning(f"⚠️ Visualizations could not be generated: {str(viz_error)}")
                                 
                             except Exception as e:
@@ -1636,6 +1687,48 @@ def render_llm_competition_tab():
     elif state.get("experiment_loaded", False) and not state.get("initialized", False):
         st.markdown("---")
         st.subheader("📂 Loaded Experiment Data")
+        
+        # Display experiment metadata prominently
+        if state.get("loaded_experiment_metadata"):
+            metadata = state["loaded_experiment_metadata"]
+            with st.expander("📊 Experiment Parameters", expanded=True):
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.metric("Number of Agents", metadata.get("n_agents", "Unknown"))
+                    st.metric("User Mode", 
+                             "🤖 Simulated" if metadata.get("user_mode") == "simulated" else "👤 Interactive",
+                             help="Whether this experiment used simulated or interactive user preferences")
+                
+                with col2:
+                    exp_params = metadata.get("experiment_params", {})
+                    st.metric("Improvement Method", exp_params.get("improvement_method", "Unknown"))
+                    st.metric("Games per Agent", exp_params.get("n_games_per_agent", "Unknown"))
+                
+                with col3:
+                    st.metric("Questions per Pair", exp_params.get("n_questions_per_pair", "Unknown"))
+                    timestamp = metadata.get("timestamp", "Unknown")
+                    try:
+                        from datetime import datetime
+                        dt = datetime.strptime(timestamp, "%Y%m%d_%H%M%S")
+                        formatted_time = dt.strftime("%Y-%m-%d %H:%M:%S")
+                        st.metric("Run Date", formatted_time)
+                    except:
+                        st.metric("Run Date", timestamp)
+                
+                # Show subfolder info
+                if metadata.get("subfolder"):
+                    st.info(f"📁 **Experiment Folder:** `{metadata['subfolder']}`")
+        
+        # Display experiment info file if available
+        if state.get("loaded_experiment_info"):
+            with st.expander("📄 Full Experiment Information", expanded=False):
+                # Display the info file content in a code block for better formatting
+                # This preserves the structure and formatting of the text file
+                st.code(state["loaded_experiment_info"], language="text")
+        elif state.get("loaded_experiment_metadata"):
+            # If info file doesn't exist, show a note
+            st.info("💡 Experiment info file not found. This may be an older experiment.")
         
         # Display all agents from loaded experiment
         if state.get("population"):

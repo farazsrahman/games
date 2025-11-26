@@ -841,38 +841,49 @@ def save_experiment_results(
 ) -> str:
     """
     Save experiment results including population, gamescape, and metadata.
+    Results are organized into subfolders based on experiment parameters.
     
     Args:
         population: List of agent strategy prompts
         egs_matrix: Empirical gamescape matrix
         game: LLMCompetition game instance
-        experiment_params: Dictionary of experiment parameters
-        save_dir: Directory to save results
+        experiment_params: Dictionary of experiment parameters (must include 'user_mode': 'simulated' or 'interactive')
+        save_dir: Base directory to save results
         prefix: Prefix for saved files
     
     Returns:
-        Base name of saved files
+        Base name of saved files (relative to subfolder)
     """
     import json
     import pickle
     import os
     from datetime import datetime
     
-    os.makedirs(save_dir, exist_ok=True)
+    # Create subfolder based on experiment parameters
+    n_agents = experiment_params.get("n_agents", "unknown")
+    improvement_method = experiment_params.get("improvement_method", "unknown")
+    user_mode = experiment_params.get("user_mode", "unknown")  # 'simulated' or 'interactive'
+    n_questions = experiment_params.get("n_questions_per_pair", "unknown")
+    
+    # Create descriptive subfolder name
+    subfolder = f"agents_{n_agents}_method_{improvement_method}_mode_{user_mode}_questions_{n_questions}"
+    experiment_dir = os.path.join(save_dir, subfolder)
+    os.makedirs(experiment_dir, exist_ok=True)
+    
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_name = f"{prefix}_{timestamp}"
     
     # Save population
-    population_file = f"{save_dir}/{base_name}_population.pkl"
+    population_file = os.path.join(experiment_dir, f"{base_name}_population.pkl")
     with open(population_file, 'wb') as f:
         pickle.dump(population, f)
     
     # Save gamescape matrix
-    matrix_file = f"{save_dir}/{base_name}_egs_matrix.npy"
+    matrix_file = os.path.join(experiment_dir, f"{base_name}_egs_matrix.npy")
     np.save(matrix_file, egs_matrix)
     
     # Save user preferences
-    prefs_file = f"{save_dir}/{base_name}_user_prefs.json"
+    prefs_file = os.path.join(experiment_dir, f"{base_name}_user_prefs.json")
     prefs_dict = {
         "sociability": game.user_prefs.sociability,
         "knowledge_depth": game.user_prefs.knowledge_depth,
@@ -891,6 +902,8 @@ def save_experiment_results(
         "experiment_params": experiment_params,
         "n_agents": len(population),
         "user_preferences": prefs_dict,
+        "user_mode": user_mode,  # Track simulated vs interactive
+        "subfolder": subfolder,  # Track which subfolder this was saved in
         "gamescape_stats": {
             "min": float(egs_matrix.min()),
             "max": float(egs_matrix.max()),
@@ -903,11 +916,84 @@ def save_experiment_results(
             "preferences": prefs_file,
         }
     }
-    metadata_file = f"{save_dir}/{base_name}_metadata.json"
+    metadata_file = os.path.join(experiment_dir, f"{base_name}_metadata.json")
     with open(metadata_file, 'w') as f:
         json.dump(metadata, f, indent=2)
     
-    return base_name
+    # Create comprehensive experiment info text file
+    info_file = os.path.join(experiment_dir, f"{base_name}_experiment_info.txt")
+    with open(info_file, 'w') as f:
+        f.write("=" * 80 + "\n")
+        f.write("LLM Competition Experiment Information\n")
+        f.write("=" * 80 + "\n\n")
+        
+        f.write(f"Experiment ID: {base_name}\n")
+        f.write(f"Timestamp: {timestamp}\n")
+        f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        
+        f.write("-" * 80 + "\n")
+        f.write("EXPERIMENT PARAMETERS\n")
+        f.write("-" * 80 + "\n\n")
+        
+        f.write(f"Number of Agents: {len(population)}\n")
+        f.write(f"Improvement Method: {experiment_params.get('improvement_method', 'N/A')}\n")
+        f.write(f"Games per Agent (for improvement): {experiment_params.get('n_games_per_agent', 'N/A')}\n")
+        f.write(f"Questions per Agent Pair (for EGS matrix): {experiment_params.get('n_questions_per_pair', 'N/A')}\n")
+        f.write(f"User Mode: {user_mode.upper()}\n")
+        f.write(f"  - Simulated: Uses automated user preference simulation\n")
+        f.write(f"  - Interactive: Requires human feedback for each comparison\n\n")
+        
+        f.write("-" * 80 + "\n")
+        f.write("TRAINING STATISTICS\n")
+        f.write("-" * 80 + "\n\n")
+        
+        f.write(f"Total Training History Entries: {experiment_params.get('training_history_length', 'N/A')}\n")
+        f.write(f"Total Games Played: {experiment_params.get('total_games_played', 'N/A')}\n\n")
+        
+        f.write("-" * 80 + "\n")
+        f.write("EGS MATRIX STATISTICS\n")
+        f.write("-" * 80 + "\n\n")
+        
+        f.write(f"Matrix Shape: {egs_matrix.shape[0]} × {egs_matrix.shape[1]}\n")
+        f.write(f"Min Payoff: {metadata['gamescape_stats']['min']:.4f}\n")
+        f.write(f"Max Payoff: {metadata['gamescape_stats']['max']:.4f}\n")
+        f.write(f"Mean Payoff: {metadata['gamescape_stats']['mean']:.4f}\n")
+        f.write(f"Std Dev Payoff: {metadata['gamescape_stats']['std']:.4f}\n\n")
+        
+        f.write("-" * 80 + "\n")
+        f.write("USER PREFERENCES\n")
+        f.write("-" * 80 + "\n\n")
+        
+        for key, value in prefs_dict.items():
+            f.write(f"{key.replace('_', ' ').title()}: {value:.4f}\n")
+        f.write("\n")
+        
+        f.write("-" * 80 + "\n")
+        f.write("FILE LOCATIONS\n")
+        f.write("-" * 80 + "\n\n")
+        
+        f.write(f"Experiment Directory: {experiment_dir}\n")
+        f.write(f"Subfolder: {subfolder}\n\n")
+        
+        f.write("Files:\n")
+        f.write(f"  - Population: {os.path.basename(population_file)}\n")
+        f.write(f"  - EGS Matrix: {os.path.basename(matrix_file)}\n")
+        f.write(f"  - User Preferences: {os.path.basename(prefs_file)}\n")
+        f.write(f"  - Metadata: {os.path.basename(metadata_file)}\n")
+        f.write(f"  - Experiment Info: {os.path.basename(info_file)}\n")
+        f.write(f"  - Visualizations: {base_name}_egs_*.png\n\n")
+        
+        f.write("-" * 80 + "\n")
+        f.write("ADDITIONAL NOTES\n")
+        f.write("-" * 80 + "\n\n")
+        
+        # Leave space for user to add notes
+        f.write("[Add any additional notes about this experiment here]\n")
+        f.write("\n")
+        f.write("=" * 80 + "\n")
+    
+    # Return path relative to base save_dir for compatibility
+    return os.path.join(subfolder, base_name)
 
 
 def load_experiment_results(
@@ -916,18 +1002,23 @@ def load_experiment_results(
 ) -> Dict[str, any]:
     """
     Load experiment results from saved files.
+    base_name can be either:
+    - Just the filename (e.g., "llm_competition_20240101_120000") - will search subfolders
+    - Full path including subfolder (e.g., "agents_10_method_weaker_mode_simulated/llm_competition_20240101_120000")
     
     Args:
-        base_name: Base name of the experiment (e.g., "llm_competition_20240101_120000")
-        save_dir: Directory where results are saved
+        base_name: Base name of the experiment (can include subfolder path)
+        save_dir: Base directory where results are saved
     
     Returns:
         Dictionary containing:
         - "population": List of agent strategy prompts
         - "egs_matrix": Empirical gamescape matrix
         - "user_prefs": UserPreferences object
-        - "metadata": Dictionary of experiment metadata
+        - "metadata": Dictionary of experiment metadata (includes user_mode, subfolder, etc.)
         - "loaded_successfully": Boolean indicating if all files were found
+        - "experiment_dir": Directory where experiment files are located
+        - "base_name_only": Just the filename without subfolder
     
     Raises:
         FileNotFoundError: If required files are missing
@@ -936,10 +1027,31 @@ def load_experiment_results(
     import pickle
     import os
     
-    population_file = f"{save_dir}/{base_name}_population.pkl"
-    matrix_file = f"{save_dir}/{base_name}_egs_matrix.npy"
-    prefs_file = f"{save_dir}/{base_name}_user_prefs.json"
-    metadata_file = f"{save_dir}/{base_name}_metadata.json"
+    # Handle both formats: with subfolder or without
+    if "/" in base_name or "\\" in base_name:
+        # Full path provided
+        full_path = os.path.join(save_dir, base_name)
+        experiment_dir = os.path.dirname(full_path)
+        base_name_only = os.path.basename(base_name)
+    else:
+        # Just base name - search in subfolders
+        base_name_only = base_name
+        experiment_dir = None
+        # Search for metadata file in subfolders
+        for root, dirs, files in os.walk(save_dir):
+            metadata_file_candidate = os.path.join(root, f"{base_name_only}_metadata.json")
+            if os.path.exists(metadata_file_candidate):
+                experiment_dir = root
+                break
+        
+        if experiment_dir is None:
+            # Fallback: try root directory
+            experiment_dir = save_dir
+    
+    population_file = os.path.join(experiment_dir, f"{base_name_only}_population.pkl")
+    matrix_file = os.path.join(experiment_dir, f"{base_name_only}_egs_matrix.npy")
+    prefs_file = os.path.join(experiment_dir, f"{base_name_only}_user_prefs.json")
+    metadata_file = os.path.join(experiment_dir, f"{base_name_only}_metadata.json")
     
     result = {
         "loaded_successfully": False,
@@ -980,17 +1092,42 @@ def load_experiment_results(
         
         result["loaded_successfully"] = True
         
-        # Check for saved visualization files
+        # Check for saved visualization files (in the same experiment directory)
         embedding_methods = ["schur", "PCA", "SVD", "tSNE"]
         for method in embedding_methods:
-            viz_file = f"{save_dir}/{base_name}_egs_{method}.png"
+            viz_file = os.path.join(experiment_dir, f"{base_name_only}_egs_{method}.png")
             if os.path.exists(viz_file):
                 result["visualization_files"].append({
                     "method": method,
                     "path": viz_file
                 })
+        
+        # Store the experiment directory and base name for reference
+        result["experiment_dir"] = experiment_dir
+        result["base_name_only"] = base_name_only
+        
+        # Load experiment info text file if it exists (try even if other loading failed)
+        info_file = os.path.join(experiment_dir, f"{base_name_only}_experiment_info.txt")
+        if os.path.exists(info_file):
+            try:
+                with open(info_file, 'r') as f:
+                    result["experiment_info"] = f.read()
+            except Exception as e:
+                result["experiment_info"] = None
+                result["experiment_info_error"] = str(e)
+        else:
+            result["experiment_info"] = None
     except Exception as e:
         result["error"] = str(e)
+        # Still try to load info file even if other loading failed
+        if "experiment_dir" in result and "base_name_only" in result:
+            info_file = os.path.join(result["experiment_dir"], f"{result['base_name_only']}_experiment_info.txt")
+            if os.path.exists(info_file):
+                try:
+                    with open(info_file, 'r') as f:
+                        result["experiment_info"] = f.read()
+                except:
+                    pass
         return result
     
     return result
@@ -998,22 +1135,26 @@ def load_experiment_results(
 
 def list_saved_experiments(save_dir: str = "out/llm_competition") -> List[Dict[str, str]]:
     """
-    List all saved experiments in the output directory.
+    List all saved experiments in the output directory and subfolders.
     
     Args:
-        save_dir: Directory to search for experiments
+        save_dir: Base directory to search for experiments (searches recursively in subfolders)
     
     Returns:
         List of dictionaries with experiment info:
-        - "base_name": Base name of experiment
+        - "base_name": Full path including subfolder (for loading)
+        - "base_name_only": Just the filename
         - "timestamp": Timestamp from filename
+        - "subfolder": Subfolder name (experiment parameters)
         - "metadata_file": Path to metadata file
         - "has_population": Whether population file exists
         - "has_matrix": Whether EGS matrix exists
         - "has_prefs": Whether preferences file exists
+        - "user_mode": 'simulated' or 'interactive' (from metadata if available)
     """
     import os
     import re
+    import json
     from pathlib import Path
     
     experiments = []
@@ -1021,32 +1162,64 @@ def list_saved_experiments(save_dir: str = "out/llm_competition") -> List[Dict[s
     if not os.path.exists(save_dir):
         return experiments
     
-    # Find all metadata files
+    # Find all metadata files recursively in subfolders
     pattern = re.compile(r"^(llm_competition_\d{8}_\d{6})_metadata\.json$")
     
-    for file in os.listdir(save_dir):
-        match = pattern.match(file)
-        if match:
-            base_name = match.group(1)
-            metadata_file = os.path.join(save_dir, file)
-            
-            # Check which files exist
-            population_file = os.path.join(save_dir, f"{base_name}_population.pkl")
-            matrix_file = os.path.join(save_dir, f"{base_name}_egs_matrix.npy")
-            prefs_file = os.path.join(save_dir, f"{base_name}_user_prefs.json")
-            
-            # Extract timestamp
-            timestamp_match = re.search(r"(\d{8}_\d{6})", base_name)
-            timestamp = timestamp_match.group(1) if timestamp_match else "unknown"
-            
-            experiments.append({
-                "base_name": base_name,
-                "timestamp": timestamp,
-                "metadata_file": metadata_file,
-                "has_population": os.path.exists(population_file),
-                "has_matrix": os.path.exists(matrix_file),
-                "has_prefs": os.path.exists(prefs_file),
-            })
+    for root, dirs, files in os.walk(save_dir):
+        for file in files:
+            match = pattern.match(file)
+            if match:
+                base_name_only = match.group(1)
+                metadata_file = os.path.join(root, file)
+                
+                # Get subfolder name (relative to save_dir)
+                rel_path = os.path.relpath(root, save_dir)
+                subfolder = rel_path if rel_path != "." else "root"
+                
+                # Full base name including subfolder for loading
+                if subfolder == "root":
+                    base_name = base_name_only
+                else:
+                    base_name = os.path.join(subfolder, base_name_only).replace("\\", "/")
+                
+                # Check which files exist
+                population_file = os.path.join(root, f"{base_name_only}_population.pkl")
+                matrix_file = os.path.join(root, f"{base_name_only}_egs_matrix.npy")
+                prefs_file = os.path.join(root, f"{base_name_only}_user_prefs.json")
+                
+                # Extract timestamp
+                timestamp_match = re.search(r"(\d{8}_\d{6})", base_name_only)
+                timestamp = timestamp_match.group(1) if timestamp_match else "unknown"
+                
+                # Try to load metadata to get user_mode and other info
+                user_mode = "unknown"
+                n_agents = "unknown"
+                improvement_method = "unknown"
+                n_questions = "unknown"
+                try:
+                    with open(metadata_file, 'r') as f:
+                        metadata = json.load(f)
+                        user_mode = metadata.get("user_mode", "unknown")
+                        n_agents = metadata.get("n_agents", metadata.get("experiment_params", {}).get("n_agents", "unknown"))
+                        improvement_method = metadata.get("experiment_params", {}).get("improvement_method", "unknown")
+                        n_questions = metadata.get("experiment_params", {}).get("n_questions_per_pair", "unknown")
+                except:
+                    pass
+                
+                experiments.append({
+                    "base_name": base_name,  # Full path for loading
+                    "base_name_only": base_name_only,  # Just filename
+                    "timestamp": timestamp,
+                    "subfolder": subfolder,
+                    "metadata_file": metadata_file,
+                    "has_population": os.path.exists(population_file),
+                    "has_matrix": os.path.exists(matrix_file),
+                    "has_prefs": os.path.exists(prefs_file),
+                    "user_mode": user_mode,
+                    "n_agents": n_agents,
+                    "improvement_method": improvement_method,
+                    "n_questions_per_pair": n_questions,
+                })
     
     # Sort by timestamp (newest first)
     experiments.sort(key=lambda x: x["timestamp"], reverse=True)
@@ -1062,6 +1235,11 @@ def visualize_gamescape(
     """
     Visualize the empirical gamescape using different embedding methods.
     
+    Note: prefix can include subfolder path (e.g., "agents_10_method_weaker/llm_competition_20240101_120000")
+    """
+    """
+    Visualize the empirical gamescape using different embedding methods.
+    
     Args:
         egs_matrix: Empirical gamescape matrix
         save_dir: Directory to save visualizations
@@ -1070,7 +1248,18 @@ def visualize_gamescape(
     import os
     from games.egs import EmpiricalGS, visualize_egs_matrix_and_embeddings
     
-    os.makedirs(save_dir, exist_ok=True)
+    # Handle prefix that might include subfolder
+    if "/" in prefix or "\\" in prefix:
+        # Full path provided
+        full_path = os.path.join(save_dir, prefix)
+        experiment_dir = os.path.dirname(full_path)
+        base_name_only = os.path.basename(prefix)
+    else:
+        # Just base name - save in root
+        experiment_dir = save_dir
+        base_name_only = prefix
+    
+    os.makedirs(experiment_dir, exist_ok=True)
     egs = EmpiricalGS(egs_matrix)
     
     embedding_methods = {
@@ -1085,7 +1274,7 @@ def visualize_gamescape(
     for method_name, embedding_func in embedding_methods.items():
         try:
             embeddings = embedding_func()
-            save_path = f"{save_dir}/{prefix}_egs_{method_name}.png"
+            save_path = os.path.join(experiment_dir, f"{base_name_only}_egs_{method_name}.png")
             visualize_egs_matrix_and_embeddings(egs, embeddings, save_path=save_path)
         except Exception as e:
             print(f"⚠️  {method_name} visualization failed: {e}")

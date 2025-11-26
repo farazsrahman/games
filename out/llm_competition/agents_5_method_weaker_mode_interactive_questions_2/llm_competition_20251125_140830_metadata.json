@@ -5,7 +5,9 @@
     "n_games_per_agent": 1,
     "improvement_method": "weaker",
     "training_history_length": 3,
-    "total_games_played": 3
+    "total_games_played": 3,
+    "n_questions_per_pair": 2,
+    "user_mode": "interactive"
   },
   "n_agents": 5,
   "user_preferences": {
@@ -24,8 +26,10 @@
     "std": 0.7180219742846006
   },
   "files": {
-    "population": "out/llm_competition/llm_competition_20251125_140830_population.pkl",
-    "matrix": "out/llm_competition/llm_competition_20251125_140830_egs_matrix.npy",
-    "preferences": "out/llm_competition/llm_competition_20251125_140830_user_prefs.json"
-  }
+    "population": "out/llm_competition/agents_5_method_weaker_mode_interactive_questions_2/llm_competition_20251125_140830_population.pkl",
+    "matrix": "out/llm_competition/agents_5_method_weaker_mode_interactive_questions_2/llm_competition_20251125_140830_egs_matrix.npy",
+    "preferences": "out/llm_competition/agents_5_method_weaker_mode_interactive_questions_2/llm_competition_20251125_140830_user_prefs.json"
+  },
+  "user_mode": "interactive",
+  "subfolder": "agents_5_method_weaker_mode_interactive_questions_2"
 }
