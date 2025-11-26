@@ -224,26 +224,36 @@ if __name__ == "__main__":
     from games.disc.disc_game import DiscGame, get_RPS_triangle
     from games.disc.disc_game_vis import plot_image
 
-    game = DiscGame()
-    initial_population = get_RPS_triangle()
-    # final_population, payoff_matrix = train_population_from_last_agent(initial_population, run_self_play, game, n_iters=4, n_games_per_empirical_payoff=3)
-    # final_population, payoff_matrix = train_population_from_last_agent(initial_population, run_PSRO_uniform_weaker, game, n_iters=80, n_games_per_empirical_payoff=4, learning_rate=.1)
-    final_population, payoff_matrix = train_population_from_random_agent(initial_population, run_PSRO_uniform_weaker, game, n_iters=80, n_games_per_empirical_payoff=4, learning_rate=.5)
+    # game = DiscGame()
+    # initial_population = get_RPS_triangle()
+    # # final_population, payoff_matrix = train_population_from_last_agent(initial_population, run_self_play, game, n_iters=4, n_games_per_empirical_payoff=3)
+    # # final_population, payoff_matrix = train_population_from_last_agent(initial_population, run_PSRO_uniform_weaker, game, n_iters=80, n_games_per_empirical_payoff=4, learning_rate=.1)
+    # final_population, payoff_matrix = train_population_from_random_agent(initial_population, run_PSRO_uniform_weaker, game, n_iters=80, n_games_per_empirical_payoff=4, learning_rate=.5)
 
 
-    # from games.llms.llm2 import LLMRockPaperScissors, rock_prompt, paper_scissors_prompt, example_population 
-    # from games.disc.disc_game import rps_to_disc
+    from games.llms.llm2 import LLMRockPaperScissors, rock_prompt, paper_scissors_prompt, example_population 
+    from games.disc.disc_game import rps_to_disc
 
     # game = LLMRockPaperScissors()
-    # # Initial population: rock, paper-or-scissors, fully random
-    # # initial_population = [rock_prompt, paper_scissors_prompt]
-    # # final_population, payoff_matrix = train_population_from_last_agent(example_population, run_self_play, game, n_iters=4, n_games_per_empirical_payoff=5)
+    # final_population, payoff_matrix = train_population_from_last_agent(example_population, run_self_play, game, n_iters=4, n_games_per_empirical_payoff=5)
     # final_population, payoff_matrix = train_population_from_last_agent(example_population, run_PSRO_uniform_weaker_from_transcripts, game, n_iters=4, n_games_per_empirical_payoff=5)
 
-    # A = compute_empirical_payoff_matrix_serial(example_population, game, n_games=10)
-    # print(A)
-    # A = compute_empirical_payoff_matrix_parallel(example_population, game, n_games=10)
-    # print(A)
+
+    # Use LLMRockPaperScissors from multiturn_rps instead of llm2 for this block
+
+    from games.llms.multiturn_rps import LLMRockPaperScissors as MTRPS_LLMRockPaperScissors
+    from games.llms.multiturn_rps import example_population as mt_example_population
+
+    mt_game = MTRPS_LLMRockPaperScissors()
+
+    # final_population, payoff_matrix = train_population_from_last_agent(mt_example_population, run_self_play, mt_game, n_iters=4, n_games_per_empirical_payoff=5)
+    final_population, payoff_matrix = train_population_from_last_agent(
+        mt_example_population,
+        run_PSRO_uniform_from_transcripts,
+        mt_game,
+        n_iters=4,
+        n_games_per_empirical_payoff=5
+    )
 
 
     print("Final population strategy prompts:")
