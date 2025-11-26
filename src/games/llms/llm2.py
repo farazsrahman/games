@@ -14,7 +14,7 @@ from typing import List, Optional, Tuple
 from openai import OpenAI
 oai_client = OpenAI()
 OPT_MODEL_NAME = os.environ.get("OPENAI_MODEL", "gpt-5.1")
-MAX_OPT_TOKENS = int(os.environ.get("MAX_OPT_TOKENS", "2048") )
+MAX_OPT_TOKENS = int(os.environ.get("MAX_OPT_TOKENS", "512") )
 
 from groq import Groq
 groq_client = Groq()
@@ -96,14 +96,10 @@ OUTPUT RULES (CRITICAL):
 """.strip()
 
 def get_opt_prompt(u_prompt: str, transcripts: str, game_prompt: str) -> str:
-    opt_prompt = f"""
-    {game_prompt}\n\n
-
-    Player 1 {u_prompt}\n\n
-
-    TRANSCRIPTS {transcripts}\n\n
-    """.strip()
-
+    opt_prompt = f"{game_prompt}\n\nPlayer 1 {u_prompt}\n\nTRANSCRIPTS\n\n"
+    for idx in range(len(transcripts)):
+        opt_prompt += f"GAME {idx}:\n{transcripts[idx]}\n\n"
+    print(opt_prompt)
     return opt_prompt
 
 # ---- RPS Specific Prompts + Functions ----
@@ -120,6 +116,9 @@ After both players choose their item, they are revealed and the result of the ga
   - rock beats scissors
   - scissors beats paper
   - paper beats rock
+
+STRATEGY PROMPT RULES:
+- Strategies do not see any previous game transcripts so they should not refer to previous transcripts. 
 
 OUTPUT RULES (CRITICAL):
 - When it is time to choose your move, you MUST respond with exactly ONE character:
