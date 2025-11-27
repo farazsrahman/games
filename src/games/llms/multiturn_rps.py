@@ -43,64 +43,84 @@ OUTPUT RULES (CRITICAL):
 - No explanations, no reasoning, no markdown, no preamble, no quotes.
 """.strip()
 
+import time
+from groq import APIStatusError
+
 def call_model(user_content: str, conversation_history: list = None) -> str:
     messages = [{"role": "system", "content": AGENT_SYSTEM_PROMPT}]
-    
+
     # Add conversation history if provided
     if conversation_history:
         messages.extend(conversation_history)
     
     # Add current user message
     messages.append({"role": "user", "content": user_content})
-    
-    resp = groq_client.chat.completions.create(
-        model=AGENT_MODEL_NAME,
-        max_tokens=MAX_TOKENS,
-        temperature=1.0,
-        messages=messages,
-        service_tier="flex"
-    )
-    # print("Service tier used:", resp.service_tier)
-    return resp.choices[0].message.content.strip()
+
+    backoff = 3
+    max_backoff = 96
+
+    while True:
+        try:
+            resp = groq_client.chat.completions.create(
+                model=AGENT_MODEL_NAME,
+                max_tokens=MAX_TOKENS,
+                temperature=1.0,
+                messages=messages,
+                service_tier="flex"
+            )
+            return resp.choices[0].message.content.strip()
+        except APIStatusError as err:
+            if getattr(err, "response", None) and hasattr(err.response, "json"):
+                err_json = err.response.json()
+                # Defensive: err_json may not be dict, but should be
+                if isinstance(err_json, dict) and "error" in err_json:
+                    err_msg = err_json["error"].get("message", "")
+                    if "`flex` tier capacity exceeded" in err_msg:
+                        if backoff > max_backoff:
+                            raise
+                        print(f"Retrying after {backoff} seconds due to flex tier capacity exceeded.")  # ADDED PRINT
+                        time.sleep(backoff)
+                        backoff *= 2
+                        continue
+            raise
 
 OPT_SYSTEM_PROMPT = """
-You are about to receive a transcript of a two-player game which includes the following information:
+You are about to receive transcripts from multiple games between Player 1 and their opponent. Each transcript includes the following information:
 
 - GAME-PROMPT: The instructions for how the game is played.
-print("Service tier used:", resp.service_tier)- STRATEGY-PROMPT: The description that specifies how Player 1 is instructed to play.
-- TRANSCRIPTS: The outcomes of one or more rounds between Player 1 and their opponent.
+- STRATEGY-PROMPT: The description that specifies how Player 1 is instructed to play.
+- TRANSCRIPTS: You will receive transcripts from multiple games. Each game may contain a variable number of rounds. Each round in a game is played against the same opponent. Different games may be played against different opponents.
 
 You will NOT receive any information about Player 2's strategy prompt or instructions.
 
-The TRANSCRIPTS will provide information about how Player 1 performs against their opponent. The format of each transcript entry is ('<player1-action>', '<player2-action>', 'payoff'), where a positive payoff means Player 1 wins, and a negative payoff means Player 2 wins.
+The TRANSCRIPTS will provide information about how Player 1 performs against their opponent. Each round within a game is formatted as "Round X: You played <action>, opponent played <action> - <result>", where the result indicates whether you (Player 1) won, the opponent won, or it was a tie.
 
-Your job as a third-party optimizer is to improve Player 1's STRATEGY-PROMPT by examining the transcript. Identify Player 1's weaknesses and suggest an updated STRATEGY-PROMPT that increases their chance of winning against the opponents seen in the transcript rounds.
+Your job as a third-party optimizer is to improve Player 1's STRATEGY-PROMPT by examining the transcripts from all games. Identify Player 1's weaknesses and suggest an updated STRATEGY-PROMPT that increases their chance of winning against the opponents seen in these games.
 
-First, consider how Player 1 performed in the games; think carefully about how you would update Player 1's strategy without changing it too much—try to preserve strengths that are not challenged in the transcript. Do not think generally about all possible opponents; only consider the specific rounds present in the transcripts.
+First, consider how Player 1 performed across all the games; think carefully about how you would update Player 1's strategy without changing it too much to increase their played value in the above game. Do not think generally about all possible opponents; only consider the specific rounds present in the transcripts.
 
 OUTPUT RULES (CRITICAL):
 - Use reasoning to carefully determine the best possible new strategy prompt, but DO NOT include any reasoning or summary in your response.
 - Return ONLY a string of the following format: "STRATEGY-PROMPT: <strategy-description-here>"
 """.strip()
 
-def format_match_transcript(match_transcript: list) -> str:
+def transform_transcript_for_agent(transcript: list, is_player_1: bool) -> list:
     """
-    Format a single match transcript (list of round tuples) into a string.
+    Transform transcript so agent always sees themselves as player 1.
     
     Args:
-        match_transcript: List of tuples (move_u, move_v, payout) from a single match
+        transcript: List of tuples (action_1, action_2, value) from player 1's perspective
+        is_player_1: True if this agent is player 1, False if player 2
     
     Returns:
-        Formatted string representation of the match
+        List of tuples (my_action, opp_action, value) where value > 0 means this agent wins
     """
-    if not match_transcript:
-        return "No rounds played."
-    
-    lines = []
-    for round_idx, (move_u, move_v, payout) in enumerate(match_transcript, 1):
-        lines.append(f"Round {round_idx}: ({move_u}, {move_v}, {payout})")
-    
-    return "\n".join(lines)
+    if is_player_1:
+        # No transformation needed - already from player 1's perspective
+        return transcript
+    else:
+        # Transform: swap actions and negate value
+        return [(action_2, action_1, -value) for action_1, action_2, value in transcript]
 
 def get_opt_prompt(u_prompt: str, transcripts: list, game_prompt: str) -> str:
     """
@@ -108,15 +128,19 @@ def get_opt_prompt(u_prompt: str, transcripts: list, game_prompt: str) -> str:
     
     Args:
         u_prompt: Strategy prompt for player 1
-        transcripts: List of match transcripts, where each match transcript is a list of (move_u, move_v, payout) tuples
+        transcripts: List of game transcripts, where each game transcript is a list of (action_1, action_2, value) tuples
+                    from player 1's perspective
         game_prompt: Game instructions prompt
     
     Returns:
         Formatted prompt string for the optimizer
     """
+    n_games = len(transcripts)
     opt_prompt = f"{game_prompt}\n\nPlayer 1 {u_prompt}\n\nTRANSCRIPTS\n\n"
-    for idx, match_transcript in enumerate(transcripts):
-        opt_prompt += f"GAME {idx}:\n{format_match_transcript(match_transcript)}\n\n"
+    opt_prompt += f"You are receiving transcripts from {n_games} game(s). Each game may contain a variable number of rounds.\n\n"
+    for idx, game_transcript in enumerate(transcripts):
+        transcript_formatted = format_transcript(game_transcript)
+        opt_prompt += f"GAME {idx + 1}:\nTranscript from all rounds:\n{transcript_formatted}\n\n"
     # print(opt_prompt)
     return opt_prompt
 
@@ -138,7 +162,7 @@ def get_rps_prompt(n_games: int = None, inform_game_count: bool = False) -> str:
     """.strip()
         
     if inform_game_count and n_games is not None:
-        base_prompt += f"\n\nThis match consists of {n_games} rounds. You will play {n_games} games against your opponent."
+        base_prompt += f"\n\nThis game consists of {n_games} rounds."
     
     base_prompt += """
     OUTPUT RULES (CRITICAL):
@@ -158,10 +182,6 @@ def get_rps_prompt(n_games: int = None, inform_game_count: bool = False) -> str:
 # Default RPS prompt for backward compatibility
 rps_prompt = get_rps_prompt()
 
-rock_prompt = """
-STRATEGY-PROMPT: Always play rock.
-""".strip()
-
 alternating_paper_scissors_prompt = """
 STRATEGY-PROMPT: Alternate deterministically: first play paper, then scissors, then paper, then scissors, and so on.
 """.strip()
@@ -174,8 +194,11 @@ alternating_scissors_rock_prompt = """
 STRATEGY-PROMPT: Alternate deterministically: first play scissors, then rock, then scissors, then rock, and so on.
 """.strip()
 
+alternating_rock_scissors_prompt = """
+STRATEGY-PROMPT: Alternate deterministically: first play rock, then scissors, then rock, then scissors, and so on.
+""".strip()
 
-example_population = [rock_prompt, alternating_paper_scissors_prompt, random_prompt, alternating_scissors_rock_prompt]
+example_population = [alternating_paper_scissors_prompt, random_prompt, alternating_scissors_rock_prompt]
 
 # ---- Game evaluation ----
 
@@ -193,108 +216,127 @@ def calculate_rps_payout(move_u: str, move_v: str) -> int:
         "S": "P",
     }
 
-    # -1 if move_u beats move_v, 1 if move_v beats move_u
+    # 1 if move_u beats move_v (Player 1 wins), -1 if move_v beats move_u (Player 2 wins)
     if beats.get(u) == v:
-        return -1
-    else:
         return 1
+    else:
+        return -1
 
-def format_transcript(transcript: list, round_num: int = None, is_player_u: bool = True) -> str:
+def format_transcript(transcript: list) -> str:
     """
-    Format the transcript of previous games for inclusion in the prompt.
+    Format the transcript for inclusion in the prompt.
+    Transcript should be in format (my_action, opp_action, value) where value > 0 means "my" agent wins.
+    Uses first-person format ("You played...") since the agent/optimizer always sees themselves as player 1.
     
     Args:
-        transcript: List of tuples (move_u, move_v, payout) from previous rounds
-        round_num: Current round number (1-indexed)
-        is_player_u: True if formatting for player 1, False for player 2
+        transcript: List of tuples (my_action, opp_action, value) where the agent is always player 1
+    
+    Returns:
+        Formatted string with round-by-round results, without any header
     """
     if not transcript:
-        return "No previous rounds have been played yet."
+        return ""
     
     lines = []
-    if round_num is not None:
-        lines.append(f"Previous rounds (you are about to play round {round_num}):")
-    else:
-        lines.append("Previous rounds:")
-    
-    for i, (move_u, move_v, payout) in enumerate(transcript, 1):
-        if is_player_u:
-            my_move = move_u
-            opp_move = move_v
-            # For player 1: payout < 0 means they won, payout > 0 means opponent won
-            result = "tie" if payout == 0 else ("you won" if payout < 0 else "opponent won")
-        else:
-            my_move = move_v
-            opp_move = move_u
-            # For player 2: payout > 0 means they won, payout < 0 means opponent won
-            result = "tie" if payout == 0 else ("you won" if payout > 0 else "opponent won")
-        
-        lines.append(f"Round {i}: You played {my_move}, opponent played {opp_move} - {result}")
+    for i, (my_action, opp_action, value) in enumerate(transcript, 1):
+        result = "tie" if value == 0 else ("you won" if value > 0 else "opponent won")
+        lines.append(f"Round {i}: You played {my_action}, opponent played {opp_action} - {result}")
     
     return "\n".join(lines)
+
+def build_conversation_history(transcript: list, game_prompt: str, strategy_prompt: str) -> list:
+    """
+    Build conversation history from transcript for maintaining context across rounds.
+    
+    Args:
+        transcript: List of tuples (my_action, opp_action, value) from agent's perspective
+        game_prompt: Game instructions prompt
+        strategy_prompt: Strategy prompt for the agent
+    
+    Returns:
+        List of message dictionaries for conversation history
+    """
+    history = []
+    if not transcript:
+        return history
+    
+    for i, (my_action, opp_action, value) in enumerate(transcript, 1):
+        transcript_formatted = format_transcript(transcript[:i])
+        history.append({
+            "role": "user",
+            "content": f"{game_prompt}\n\n{strategy_prompt}\n\nPrevious rounds (you are about to play round {i}):\n{transcript_formatted}"
+        })
+        history.append({
+            "role": "assistant",
+            "content": my_action
+        })
+    return history
+
+def build_agent_prompt(game_prompt: str, strategy_prompt: str, transcript: list, round_num: int) -> str:
+    """
+    Build the full prompt for an agent including game prompt, strategy, and transcript.
+    
+    Args:
+        game_prompt: Game instructions prompt
+        strategy_prompt: Strategy prompt for the agent
+        transcript: List of tuples (my_action, opp_action, value) from agent's perspective
+        round_num: Current round number (1-indexed)
+    
+    Returns:
+        Complete prompt string for the agent
+    """
+    prompt = f"{game_prompt}\n\n{strategy_prompt}"
+    if transcript:
+        transcript_formatted = format_transcript(transcript)
+        prompt += f"\n\nPrevious rounds (you are about to play round {round_num}):\n{transcript_formatted}"
+    return prompt
 
 def evaluate(u_prompt: str, v_prompt: str, game_prompt: str, 
              transcript_u: list = None, transcript_v: list = None,
              round_num: int = None):
     """
     Evaluate two agents by calling the chosen provider with their respective strategy prompts.
-    Includes transcript of previous games if provided.
+    Includes transcript of previous rounds if provided.
     
     Args:
         u_prompt: Strategy prompt for player 1
         v_prompt: Strategy prompt for player 2
         game_prompt: Game instructions prompt
-        transcript_u: Previous game history for player 1 (list of (move_u, move_v, payout) tuples)
-        transcript_v: Previous game history for player 2 (list of (move_u, move_v, payout) tuples)
+        transcript_u: Previous round history from player 1's perspective (list of (action_1, action_2, value) tuples)
+        transcript_v: Previous round history from player 1's perspective (will be transformed for player 2)
         round_num: Current round number (1-indexed)
     
     Returns:
-        Tuple of (move_u, move_v, payout)
+        Tuple of (move_u, move_v, payout) where payout > 0 means player 1 wins
     """
-    # Build conversation history for player 1
-    history_u = []
-    if transcript_u:
-        for i, (mu, mv, p) in enumerate(transcript_u, 1):
-            history_u.append({
-                "role": "user",
-                "content": f"{game_prompt}\n\n{u_prompt}\n\n{format_transcript(transcript_u[:i], i, is_player_u=True)}"
-            })
-            history_u.append({
-                "role": "assistant",
-                "content": mu
-            })
+    # Transform transcripts so each agent sees themselves as player 1
+    transcript_u_transformed = transform_transcript_for_agent(transcript_u, is_player_1=True) if transcript_u else None
+    transcript_v_transformed = transform_transcript_for_agent(transcript_v, is_player_1=False) if transcript_v else None
     
-    # Build conversation history for player 2
-    history_v = []
-    if transcript_v:
-        for i, (mu, mv, p) in enumerate(transcript_v, 1):
-            history_v.append({
-                "role": "user",
-                "content": f"{game_prompt}\n\n{v_prompt}\n\n{format_transcript(transcript_v[:i], i, is_player_u=False)}"
-            })
-            history_v.append({
-                "role": "assistant",
-                "content": mv
-            })
+    # Build conversation history and prompts
+    history_u = build_conversation_history(transcript_u_transformed, game_prompt, u_prompt)
+    history_v = build_conversation_history(transcript_v_transformed, game_prompt, v_prompt)
     
-    # Current round prompts with transcript
-    transcript_text_u = format_transcript(transcript_u, round_num, is_player_u=True) if transcript_u else ""
-    transcript_text_v = format_transcript(transcript_v, round_num, is_player_u=False) if transcript_v else ""
-    
-    full_u = f"{game_prompt}\n\n{u_prompt}"
-    if transcript_text_u:
-        full_u += f"\n\n{transcript_text_u}"
-    
-    full_v = f"{game_prompt}\n\n{v_prompt}"
-    if transcript_text_v:
-        full_v += f"\n\n{transcript_text_v}"
+    full_u = build_agent_prompt(game_prompt, u_prompt, transcript_u_transformed, round_num)
+    full_v = build_agent_prompt(game_prompt, v_prompt, transcript_v_transformed, round_num)
     
     move_u = call_model(full_u, history_u)
     move_v = call_model(full_v, history_v)
+    max_invalid_attempts = 5
+    attempt = 0
+    while move_u not in ['R', 'P', 'S'] or move_v not in ['R', 'P', 'S']:
+        attempt += 1
+        if attempt > max_invalid_attempts:
+            raise ValueError(f"Invalid move(s) after {max_invalid_attempts} attempts. move_u={repr(move_u)}, move_v={repr(move_v)}")
+        if move_u not in ['R', 'P', 'S']:
+            print(f"Invalid move_u: {repr(move_u)}, re-querying...")
+            move_u = call_model(full_u, history_u)
+        if move_v not in ['R', 'P', 'S']:
+            print(f"Invalid move_v: {repr(move_v)}, re-querying...")
+            move_v = call_model(full_v, history_v)
+        time.sleep(2 ** attempt)
 
-    payout = calculate_rps_payout(move_u, move_v)
-
-    return move_u, move_v, payout
+    return move_u, move_v, calculate_rps_payout(move_u, move_v)
 
 def improve(u_prompt: str, transcripts: List[list], game_prompt: str):
     """
@@ -302,7 +344,8 @@ def improve(u_prompt: str, transcripts: List[list], game_prompt: str):
     
     Args:
         u_prompt: Strategy prompt for player 1
-        transcripts: List of match transcripts, where each match transcript is a list of (move_u, move_v, payout) tuples
+        transcripts: List of game transcripts, where each game transcript is a list of (action_1, action_2, value) tuples
+                    from player 1's perspective (value > 0 means player 1 wins)
         game_prompt: Game instructions prompt
     
     Returns:
@@ -328,8 +371,8 @@ class LLMRockPaperScissors(Game):
         Initialize the multi-turn RPS game.
         
         Args:
-            n_games: Number of games to play in each match (default: 5)
-            inform_game_count: Whether to inform agents about the number of games (default: False)
+            n_games: Number of rounds to play in each game (default: 5)
+            inform_game_count: Whether to inform agents about the number of rounds (default: False)
         """
         self.n_games = n_games
         self.inform_game_count = inform_game_count
@@ -337,7 +380,7 @@ class LLMRockPaperScissors(Game):
 
     def play(self, u, v, *, return_transcript=False):
         """
-        Play a single match between two agents.
+        Play a single game between two agents.
         
         Args:
             u: Strategy prompt for player 1
@@ -366,49 +409,45 @@ class LLMRockPaperScissors(Game):
             # Return average payout (positive means u wins on average)
             return total_payout / self.n_games
 
-    def improve(self, u, v, *, n_games=None, inform_game_count=None):
+    def improve(self, u, v, **kwargs):
         """
-        Improve agent u against agent v by playing a single match.
+        Improve agent u against agent v by playing a single game.
         """
-        n_games = n_games if n_games is not None else self.n_games
-        inform_game_count = inform_game_count if inform_game_count is not None else self.inform_game_count
-        game_prompt = get_rps_prompt(n_games, inform_game_count)
-        
         print("U:", u, "\t, V:", v)
         
-        # Play a single match (multiple rounds) and collect transcript
-        match_transcript = []
-        for round_num in trange(1, n_games + 1):
+        # Play a single game (multiple rounds) and collect transcript
+        game_transcript = []
+        for round_num in trange(1, self.n_games + 1):
             move_u, move_v, payout = evaluate(
-                u, v, game_prompt,
-                transcript_u=match_transcript, transcript_v=match_transcript,
+                u, v, self.game_prompt,
+                transcript_u=game_transcript, transcript_v=game_transcript,
                 round_num=round_num
             )
-            match_transcript.append((move_u, move_v, payout))
+            game_transcript.append((move_u, move_v, payout))
         
         # Print transcript for debugging
         print("Game Transcript:")
-        for idx, (mu, mv, p) in enumerate(match_transcript, 1):
+        for idx, (mu, mv, p) in enumerate(game_transcript, 1):
             print(f"Round {idx}: U: {mu}, V: {mv}, Payout: {p}")
         
-        # Convert single match to list format expected by improve()
-        transcripts = [match_transcript]
-        u_new = improve(u, transcripts, game_prompt)
+        # Convert single game to list format expected by improve()
+        transcripts = [game_transcript]
+        u_new = improve(u, transcripts, self.game_prompt)
         print("U_NEW:", u_new)
         return u_new
 
     def improve_from_transcripts(self, u, transcripts):
         """
-        Improve agent u based on accumulated transcripts from multiple matches.
+        Improve agent u based on accumulated transcripts from multiple games.
         
         Args:
             u: Strategy prompt for player 1
-            transcripts: List of match transcripts, where each match transcript is a list of (move_u, move_v, payout) tuples
+            transcripts: List of game transcripts, where each game transcript is a list of (move_u, move_v, payout) tuples
         
         Returns:
             Updated strategy prompt string
         """
-        print("U:", u, "\t, TRANSCRIPTS:", len(transcripts), "matches")
+        print("U:", u, "\t, TRANSCRIPTS:", len(transcripts), "games")
         u_new = improve(u, transcripts, self.game_prompt)
         print("U_NEW:", u_new)
         return u_new
@@ -434,22 +473,38 @@ def empirical_rps_distribution(player_prompt: str, n_games: int = 100):
 # ---- Main ----
 
 if __name__ == "__main__":
-    # Instantiate LLMRockPaperScissors and use its methods
     from games.llms.multiturn_rps import LLMRockPaperScissors
 
-    # Setup prompts and game parameters
-    p1 = rock_prompt
-    p2 = paper_scissors_prompt
+    initial_agent = alternating_rock_scissors_prompt
+    n_rounds = 8
 
-    n_games = 5
-    inform_game_count = False  # Toggle: set to True to inform agents about number of games
+    rps_game = LLMRockPaperScissors(n_games=n_rounds)
 
-    rps_game = LLMRockPaperScissors(n_games=n_games, inform_game_count=inform_game_count)
+    # Step 0: Play games with the initial agent
+    transcripts_0 = [rps_game.play(initial_agent, initial_agent, return_transcript=True) for _ in range(4)]
+    payout_0 = sum(sum(p for *_, p in tr) / len(tr) for tr in transcripts_0) / len(transcripts_0)
 
-    print(f"Playing {n_games} games (inform_game_count={inform_game_count})")
+    print(f"=== Step 0 (Initial agent) ===")
+    print(f"Avg payout before: {payout_0:.3f}")
 
-    p1_new = rps_game.improve(p1, p2)
-    
-    print(f"\n\n")
+    # Step 1: First optimization
+    agent_1 = rps_game.improve_from_transcripts(initial_agent, transcripts_0)
+    transcript_1 = rps_game.play(agent_1, initial_agent, return_transcript=True)
+    payout_1 = sum(p for *_, p in transcript_1) / len(transcript_1)
+    print(f"\n=== Step 1 (First optimization) ===")
+    print(f"Avg payout after step 1: {payout_1:.3f}")
+    print("Transcript after first optimization:")
+    print(format_transcript(transcript_1))
+    print(f"Δ Improvement (step 1 vs initial): {payout_1 - payout_0:+.3f}")
 
-    p2_new = rps_game.improve(p2, p1_new)
+    # Step 2: Second optimization
+    transcripts_1 = [rps_game.play(agent_1, initial_agent, return_transcript=True) for _ in range(4)]
+    agent_2 = rps_game.improve_from_transcripts(agent_1, transcripts_1)
+    transcript_2 = rps_game.play(agent_2, initial_agent, return_transcript=True)
+    payout_2 = sum(p for *_, p in transcript_2) / len(transcript_2)
+    print(f"\n=== Step 2 (Second optimization) ===")
+    print(f"Avg payout after step 2: {payout_2:.3f}")
+    print("Transcript after second optimization:")
+    print(format_transcript(transcript_2))
+    print(f"Δ Improvement (step 2 vs step 1): {payout_2 - payout_1:+.3f}")
+    print(f"Δ Improvement (step 2 vs initial): {payout_2 - payout_0:+.3f}")
