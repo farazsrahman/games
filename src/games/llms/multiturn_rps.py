@@ -18,7 +18,8 @@ MAX_OPT_TOKENS = int(os.environ.get("MAX_OPT_TOKENS", "512"))
 
 from groq import Groq
 groq_client = Groq()
-AGENT_MODEL_NAME = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
+# AGENT_MODEL_NAME = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
+AGENT_MODEL_NAME = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
 # Reasoning-enabled Groq models often consume a large thinking budget before
 # producing their final answer. Give them ample room so the content tokens
 # are not truncated away.
@@ -41,17 +42,14 @@ OUTPUT RULES (CRITICAL):
 - Each GAME-PROMPT will provide a very specific formatting according to the action space of the game. You MUST use this action space or you will LOSE.
 - Do NOT include any other text, words, spaces, punctuation, or formatting.
 - No explanations, no reasoning, no markdown, no preamble, no quotes.
+- You may be playing a mult-round game, in this case ONLY ouput moves for a SINGLE round at at time
 """.strip()
 
 import time
 from groq import APIStatusError
 
-def call_model(user_content: str, conversation_history: list = None) -> str:
+def call_model(user_content: str) -> str:
     messages = [{"role": "system", "content": AGENT_SYSTEM_PROMPT}]
-
-    # Add conversation history if provided
-    if conversation_history:
-        messages.extend(conversation_history)
     
     # Add current user message
     messages.append({"role": "user", "content": user_content})
@@ -169,6 +167,7 @@ def get_rps_prompt(n_games: int = None, inform_game_count: bool = False) -> str:
     - When it is time to choose your move, you MUST respond with exactly ONE character:
     R (rock), P (paper), or S (scissors).
     - Your response MUST be a single capital letter: "R", "P", or "S".
+    - You are being asked to make ONE move for THIS round only. Do NOT output multiple moves or a sequence of moves.
     - Do NOT include any other text, words, spaces, punctuation, or formatting.
     - No explanations, no reasoning, no markdown, no preamble, no quotes.
     - If you output anything other than exactly one of R / P / S, you immediately lose the game.
@@ -244,34 +243,6 @@ def format_transcript(transcript: list) -> str:
     
     return "\n".join(lines)
 
-def build_conversation_history(transcript: list, game_prompt: str, strategy_prompt: str) -> list:
-    """
-    Build conversation history from transcript for maintaining context across rounds.
-    
-    Args:
-        transcript: List of tuples (my_action, opp_action, value) from agent's perspective
-        game_prompt: Game instructions prompt
-        strategy_prompt: Strategy prompt for the agent
-    
-    Returns:
-        List of message dictionaries for conversation history
-    """
-    history = []
-    if not transcript:
-        return history
-    
-    for i, (my_action, opp_action, value) in enumerate(transcript, 1):
-        transcript_formatted = format_transcript(transcript[:i])
-        history.append({
-            "role": "user",
-            "content": f"{game_prompt}\n\n{strategy_prompt}\n\nPrevious rounds (you are about to play round {i}):\n{transcript_formatted}"
-        })
-        history.append({
-            "role": "assistant",
-            "content": my_action
-        })
-    return history
-
 def build_agent_prompt(game_prompt: str, strategy_prompt: str, transcript: list, round_num: int) -> str:
     """
     Build the full prompt for an agent including game prompt, strategy, and transcript.
@@ -313,15 +284,12 @@ def evaluate(u_prompt: str, v_prompt: str, game_prompt: str,
     transcript_u_transformed = transform_transcript_for_agent(transcript_u, is_player_1=True) if transcript_u else None
     transcript_v_transformed = transform_transcript_for_agent(transcript_v, is_player_1=False) if transcript_v else None
     
-    # Build conversation history and prompts
-    history_u = build_conversation_history(transcript_u_transformed, game_prompt, u_prompt)
-    history_v = build_conversation_history(transcript_v_transformed, game_prompt, v_prompt)
-    
+    # Build prompts (transcript is already included in the prompt)
     full_u = build_agent_prompt(game_prompt, u_prompt, transcript_u_transformed, round_num)
     full_v = build_agent_prompt(game_prompt, v_prompt, transcript_v_transformed, round_num)
     
-    move_u = call_model(full_u, history_u)
-    move_v = call_model(full_v, history_v)
+    move_u = call_model(full_u)
+    move_v = call_model(full_v)
     max_invalid_attempts = 5
     attempt = 0
     while move_u not in ['R', 'P', 'S'] or move_v not in ['R', 'P', 'S']:
@@ -330,10 +298,10 @@ def evaluate(u_prompt: str, v_prompt: str, game_prompt: str,
             raise ValueError(f"Invalid move(s) after {max_invalid_attempts} attempts. move_u={repr(move_u)}, move_v={repr(move_v)}")
         if move_u not in ['R', 'P', 'S']:
             print(f"Invalid move_u: {repr(move_u)}, re-querying...")
-            move_u = call_model(full_u, history_u)
+            move_u = call_model(full_u)
         if move_v not in ['R', 'P', 'S']:
             print(f"Invalid move_v: {repr(move_v)}, re-querying...")
-            move_v = call_model(full_v, history_v)
+            move_v = call_model(full_v)
         time.sleep(2 ** attempt)
 
     return move_u, move_v, calculate_rps_payout(move_u, move_v)
