@@ -53,7 +53,8 @@ class EmpiricalGS:
 def visualize_egs_matrix_and_embeddings(
     egs: EmpiricalGS,
     embeddings: np.ndarray,
-    save_path: str = None
+    save_path: str = None,
+    dpi: int = 150
 ):
     """
     Visualize empirical gamescape matrix and embeddings side-by-side.
@@ -62,6 +63,7 @@ def visualize_egs_matrix_and_embeddings(
         egs: EmpiricalGS instance
         embeddings: numpy array of shape (N, 2) containing embedding points
         save_path: optional path to save the figure. If None, displays the plot.
+        dpi: resolution for saved figure (default: 150)
     """
     import matplotlib.pyplot as plt
     import matplotlib.colors as mcolors
@@ -117,7 +119,7 @@ def visualize_egs_matrix_and_embeddings(
     plt.tight_layout()
     
     if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.savefig(save_path, dpi=dpi, bbox_inches='tight')
         print(f"Figure saved to {save_path}")
     else:
         plt.show()

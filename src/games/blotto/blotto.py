@@ -1,4 +1,5 @@
 import numpy as np
+from math import comb
 
 import os
 import copy
@@ -32,10 +33,12 @@ class LogitAgent(BlottoAgent):
     """
 
     def __init__(self, n_battlefields: int, budget: int):
-        assert n_battlefields == 3 and budget == 10
         self.n_battlefields = n_battlefields
         self.budget = budget
-        self.logits = np.zeros(66)
+        # Calculate number of possible allocations: comb(budget + n_battlefields - 1, n_battlefields - 1)
+        # This is the number of ways to distribute 'budget' units across 'n_battlefields' battlefields
+        num_actions = comb(budget + n_battlefields - 1, n_battlefields - 1)
+        self.logits = np.zeros(num_actions)
 
     def sample(self) -> np.ndarray:
         # Sample an allocation index from self.action (treated as logits or probabilities)
@@ -47,7 +50,7 @@ class LogitAgent(BlottoAgent):
 
     def update(self, rollouts):
         """
-        MPO-style update for a discrete (66-way) categorical policy.
+        MPO-style update for a discrete categorical policy.
         rollouts: list of (action_index, reward) pairs where reward ∈ {0, 0.5, 1}.
         """
         if not rollouts:
@@ -56,7 +59,7 @@ class LogitAgent(BlottoAgent):
         # --- E-step: build non-parametric target q(a) ∝ exp(R/eta) aggregated by action ---
         eta = 1.0                      # temperature for exponentiated-returns
         eps = 1e-8                     # numerical stability
-        A = len(self.logits)           # 66
+        A = len(self.logits)           # Number of possible allocations
         weights_per_action = np.zeros(A, dtype=np.float64)
 
         # stabilize exponentials by subtracting max reward (≤ 1.0 anyway)
@@ -135,9 +138,6 @@ class BlottoGame(Game):
         u_new.update(rollouts)
         
         return u_new
-
-
-from math import comb
 
 def allocation_to_index(x, N, K):
     """
