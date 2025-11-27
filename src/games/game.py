@@ -177,14 +177,14 @@ def run_PSRO_uniform_stronger_from_transcripts(agent_idx: int, population: list,
 
 ## -------------------------------------------------------------------- ##
 
-def train_population_from_last_agent(initial_population, update_rule, game: Game, *, n_iters: int, n_games_per_empirical_payoff: int, **kwargs):
+def train_population_from_last_agent(initial_population, update_rule, game: Game, *, n_iters: int, n_games_per_empirical_payoff: int, parallel: bool = True, **kwargs):
     import numpy as np
     population = list(initial_population)
     payoff_matrix = None
 
     for _ in range(n_iters):
         # Recompute payoff matrix only when the population has changed (agent added)
-        payoff_matrix = compute_empirical_payoff_matrix(population, game, parallel=True, cached_payoff_matrix=payoff_matrix, n_games=n_games_per_empirical_payoff)
+        payoff_matrix = compute_empirical_payoff_matrix(population, game, parallel=parallel, cached_payoff_matrix=payoff_matrix, n_games=n_games_per_empirical_payoff)
         new_agent = update_rule(
             agent_idx = -1, 
             population = population, 
@@ -197,14 +197,14 @@ def train_population_from_last_agent(initial_population, update_rule, game: Game
 
     return population, payoff_matrix
 
-def train_population_from_random_agent(initial_population, update_rule, game: Game, *, n_iters: int, n_games_per_empirical_payoff: int, **kwargs):
+def train_population_from_random_agent(initial_population, update_rule, game: Game, *, n_iters: int, n_games_per_empirical_payoff: int, parallel: bool = True, **kwargs):
     import numpy as np
     population = list(initial_population)
     payoff_matrix = None
 
     for _ in range(n_iters):
         # Recompute payoff matrix only when the population has changed (agent added)
-        payoff_matrix = compute_empirical_payoff_matrix(population, game, parallel=True, cached_payoff_matrix=payoff_matrix, n_games=n_games_per_empirical_payoff)
+        payoff_matrix = compute_empirical_payoff_matrix(population, game, parallel=parallel, cached_payoff_matrix=payoff_matrix, n_games=n_games_per_empirical_payoff)
         new_agent = update_rule(
             agent_idx = np.random.randint(0, len(population)), 
             population = population, 
@@ -220,49 +220,64 @@ def train_population_from_random_agent(initial_population, update_rule, game: Ga
 
 if __name__ == "__main__":
 
-
-    from games.disc.disc_game import DiscGame, get_RPS_triangle
-    from games.disc.disc_game_vis import plot_image
-
-    # game = DiscGame()
-    # initial_population = get_RPS_triangle()
-    # # final_population, payoff_matrix = train_population_from_last_agent(initial_population, run_self_play, game, n_iters=4, n_games_per_empirical_payoff=3)
-    # # final_population, payoff_matrix = train_population_from_last_agent(initial_population, run_PSRO_uniform_weaker, game, n_iters=80, n_games_per_empirical_payoff=4, learning_rate=.1)
-    # final_population, payoff_matrix = train_population_from_random_agent(initial_population, run_PSRO_uniform_weaker, game, n_iters=80, n_games_per_empirical_payoff=4, learning_rate=.5)
-
-
-    from games.llms.llm2 import LLMRockPaperScissors, rock_prompt, paper_scissors_prompt, example_population 
-    from games.disc.disc_game import rps_to_disc
-
-    # game = LLMRockPaperScissors()
-    # final_population, payoff_matrix = train_population_from_last_agent(example_population, run_self_play, game, n_iters=4, n_games_per_empirical_payoff=5)
-    # final_population, payoff_matrix = train_population_from_last_agent(example_population, run_PSRO_uniform_weaker_from_transcripts, game, n_iters=4, n_games_per_empirical_payoff=5)
-
-
-    # Use LLMRockPaperScissors from multiturn_rps instead of llm2 for this block
-
     from games.llms.multiturn_rps import LLMRockPaperScissors as MTRPS_LLMRockPaperScissors
     from games.llms.multiturn_rps import example_population as mt_example_population
+    from games.egs import EmpiricalGS
 
-    mt_game = MTRPS_LLMRockPaperScissors()
+    mt_game = MTRPS_LLMRockPaperScissors(n_games=7, inform_game_count = True)
 
-    # final_population, payoff_matrix = train_population_from_last_agent(mt_example_population, run_self_play, mt_game, n_iters=4, n_games_per_empirical_payoff=5)
-    final_population, payoff_matrix = train_population_from_last_agent(
+    # Run with uniform_weaker_from_transcripts
+    print("=" * 60)
+    print("Running PSRO with uniform_weaker_from_transcripts")
+    print("=" * 60)
+    final_population_weaker, payoff_matrix_weaker = train_population_from_last_agent(
         mt_example_population,
-        run_PSRO_uniform_from_transcripts,
+        run_PSRO_uniform_weaker_from_transcripts,
         mt_game,
-        n_iters=4,
+        n_iters=6,
+        n_games_per_empirical_payoff=5,
+        # parallel=False
+    )
+
+    # Run with uniform_stronger_from_transcripts
+    print("\n" + "=" * 60)
+    print("Running PSRO with uniform_stronger_from_transcripts")
+    print("=" * 60)
+    final_population_stronger, payoff_matrix_stronger = train_population_from_last_agent(
+        mt_example_population,
+        run_PSRO_uniform_stronger_from_transcripts,
+        mt_game,
+        n_iters=6,
         n_games_per_empirical_payoff=5
     )
 
+    # Compute embedding convex hull areas
+    print("\n" + "=" * 60)
+    print("Computing embedding convex hull areas")
+    print("=" * 60)
+    
+    # For weaker distribution
+    egs_weaker = EmpiricalGS(payoff_matrix_weaker)
+    embeddings_weaker = egs_weaker.schur_embeddings()
+    hull_area_weaker = egs_weaker._embedding_convex_hull_area(embeddings_weaker)
+    
+    # For stronger distribution
+    egs_stronger = EmpiricalGS(payoff_matrix_stronger)
+    embeddings_stronger = egs_stronger.schur_embeddings()
+    hull_area_stronger = egs_stronger._embedding_convex_hull_area(embeddings_stronger)
+    
+    # Print results
+    print(f"\nConvex Hull Area (uniform_weaker_from_transcripts): {hull_area_weaker:.6f}")
+    print(f"Convex Hull Area (uniform_stronger_from_transcripts): {hull_area_stronger:.6f}")
+    print(f"\nRelative difference: {abs(hull_area_weaker - hull_area_stronger) / max(hull_area_weaker, hull_area_stronger, 1e-10) * 100:.2f}%")
+    
+    if hull_area_weaker > hull_area_stronger:
+        print(f"uniform_weaker_from_transcripts has {hull_area_weaker / hull_area_stronger:.2f}x larger convex hull area")
+    elif hull_area_stronger > hull_area_weaker:
+        print(f"uniform_stronger_from_transcripts has {hull_area_stronger / hull_area_weaker:.2f}x larger convex hull area")
+    else:
+        print("Both methods have the same convex hull area")
 
-    print("Final population strategy prompts:")
-    for idx, agent in enumerate(final_population):
-        print(f"\nAgent {idx + 1}:\n{'-'*40}\n{agent}\n{'-'*40}")
 
-
-    # final_population = [rps_to_disc(empirical_rps_distribution(u, n_games=10)) for u in final_population]
-    # Plot the final population using plot_image
-    # img = plot_image(final_population)
-    # img.show()
+    breakpoint()
 
