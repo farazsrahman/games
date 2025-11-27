@@ -398,33 +398,76 @@ def render_blotto_game_tab():
     # Display results
     st.subheader("Results")
     
-    # Get latest run if available
-    latest_run = None
-    if "blotto" in [r["game"] for r in st.session_state.runs.values()]:
-        latest_run = max(
-            [r for r in st.session_state.runs.values() if r["game"] == "blotto"],
-            key=lambda x: x["timestamp"]
-        )
+    # Helper function to load results from files for a given improvement type
+    def load_results_from_files(improvement_type: str) -> Dict[str, Any]:
+        """Load visualization files from directory for a given improvement type."""
+        base_dir = Path("demos/blotto")
+        base_name = f"blotto_PSRO_{improvement_type}"
+        
+        results = {
+            "egs_visualization_paths": {},
+            "gif_path_population": None,
+            "gif_path_matchups": None,
+            "plot_path": None,
+        }
+        
+        # Load EGS visualizations
+        methods = ["PCA", "SVD", "schur", "tSNE"]
+        for method in methods:
+            egs_path = base_dir / f"{base_name}_egs_{method.lower()}.png"
+            if egs_path.exists():
+                results["egs_visualization_paths"][method] = str(egs_path.absolute())
+        
+        # Load GIFs
+        pop_gif = base_dir / f"{base_name}_population.gif"
+        if pop_gif.exists():
+            results["gif_path_population"] = str(pop_gif.absolute())
+        
+        match_gif = base_dir / f"{base_name}_matchups.gif"
+        if match_gif.exists():
+            results["gif_path_matchups"] = str(match_gif.absolute())
+        
+        # Load training plot
+        training_plot = base_dir / f"{base_name}.png"
+        if training_plot.exists():
+            results["plot_path"] = str(training_plot.absolute())
+        
+        return results
     
-    # Display visualizations in clean layout
-    if latest_run and "result" in latest_run:
-        result = latest_run["result"]
-        improvement_type = latest_run.get("type", "uniform")
+    # Helper function to display results for a given improvement type
+    def display_results_for_type(improvement_type: str):
+        """Display all results for a given improvement type."""
+        # First, try to get from session_state (most recent run of this type)
+        result = None
+        runs_of_type = [
+            r for r in st.session_state.runs.values() 
+            if r.get("game") == "blotto" and r.get("type") == improvement_type
+        ]
+        
+        if runs_of_type:
+            latest_run = max(runs_of_type, key=lambda x: x.get("timestamp", 0))
+            if "result" in latest_run:
+                result = latest_run["result"]
+        
+        # If no result in session_state, load from files
+        if not result:
+            result = load_results_from_files(improvement_type)
+        
+        # If still no results, show message
+        if not result or (not result.get("egs_visualization_paths") and 
+                         not result.get("gif_path_population") and 
+                         not result.get("plot_path")):
+            st.info(f"ℹ️ No results available for '{improvement_type}' type. Run a simulation to generate results.")
+            return
         
         # Get paths from result
-        egs_viz_paths = result.get("egs_visualization_paths", {})  # Dict of all EGS visualizations
-        # Backward compatibility: check for separate paths if combined doesn't exist
-        egs_viz_path = result.get("egs_visualization_path")  # Old single visualization
+        egs_viz_paths = result.get("egs_visualization_paths", {})
+        egs_viz_path = result.get("egs_visualization_path")
         gamescape_path = result.get("gamescape_matrix_path")
         embeddings_path = result.get("embeddings_2d_path")
         gif_pop_path = result.get("gif_path_population")
         gif_match_path = result.get("gif_path_matchups")
         training_plot_path = result.get("plot_path")
-        
-        # Debug: Show what we have
-        if "egs_visualization_paths" in result:
-            if not egs_viz_paths:
-                st.info(f"ℹ️ EGS visualizations key exists but is empty. This may indicate an error during generation.")
         
         # Display all EGS visualizations (Matrix + PCA, Schur, SVD, t-SNE)
         if egs_viz_paths and len(egs_viz_paths) > 0:
@@ -447,14 +490,12 @@ def render_blotto_game_tab():
                                 data=f.read(),
                                 file_name=Path(egs_viz_paths[method]).name,
                                 mime="image/png",
-                                key=f"blotto_egs_{method.lower()}_dl"
+                                key=f"blotto_{improvement_type}_egs_{method.lower()}_dl"
                             )
                     displayed_count += 1
             
             if displayed_count == 0:
                 st.warning(f"⚠️ EGS visualizations were generated but files not found. Expected paths: {list(egs_viz_paths.values())}")
-        elif egs_viz_paths and len(egs_viz_paths) == 0:
-            st.info("ℹ️ No EGS visualizations were generated (empty result). This may indicate an error during generation.")
         elif egs_viz_path and Path(egs_viz_path).exists():
             # Fallback: single combined visualization (backward compatibility)
             st.markdown("#### Empirical Gamescape Visualization")
@@ -467,7 +508,7 @@ def render_blotto_game_tab():
                     data=f.read(),
                     file_name=Path(egs_viz_path).name,
                     mime="image/png",
-                    key="blotto_egs_viz_dl"
+                    key=f"blotto_{improvement_type}_egs_viz_dl"
                 )
         elif gamescape_path or embeddings_path:
             # Fallback: show separate visualizations for backward compatibility
@@ -484,7 +525,7 @@ def render_blotto_game_tab():
                             data=f.read(),
                             file_name=Path(gamescape_path).name,
                             mime="image/png",
-                            key="blotto_gamescape_dl"
+                            key=f"blotto_{improvement_type}_gamescape_dl"
                         )
                 else:
                     st.info("Gamescape matrix not available")
@@ -499,12 +540,12 @@ def render_blotto_game_tab():
                             data=f.read(),
                             file_name=Path(embeddings_path).name,
                             mime="image/png",
-                            key="blotto_embeddings_dl"
+                            key=f"blotto_{improvement_type}_embeddings_dl"
                         )
                 else:
                     st.info("2D embeddings not available")
         
-        # Second row: Population GIF
+        # Population GIF
         if gif_pop_path and Path(gif_pop_path).exists():
             st.markdown("#### Population Evolution (Allocations & Entropy)")
             with open(gif_pop_path, "rb") as f:
@@ -520,10 +561,10 @@ def render_blotto_game_tab():
                 data=gif_bytes,
                 file_name=Path(gif_pop_path).name,
                 mime="image/gif",
-                key="blotto_pop_gif_dl"
+                key=f"blotto_{improvement_type}_pop_gif_dl"
             )
         
-        # Third row: Matchups GIF
+        # Matchups GIF
         if gif_match_path and Path(gif_match_path).exists():
             st.markdown("#### Matchups Evolution (Win Rates)")
             with open(gif_match_path, "rb") as f:
@@ -539,10 +580,10 @@ def render_blotto_game_tab():
                 data=gif_bytes,
                 file_name=Path(gif_match_path).name,
                 mime="image/gif",
-                key="blotto_match_gif_dl"
+                key=f"blotto_{improvement_type}_match_gif_dl"
             )
         
-        # Optional: Training plot (can be shown in expander or separate section)
+        # Training plot
         if training_plot_path and Path(training_plot_path).exists():
             with st.expander("📈 Training Progress Plot", expanded=False):
                 st.image(str(training_plot_path), use_container_width=True)
@@ -552,27 +593,34 @@ def render_blotto_game_tab():
                         data=f.read(),
                         file_name=Path(training_plot_path).name,
                         mime="image/png",
-                        key="blotto_training_dl"
+                        key=f"blotto_{improvement_type}_training_dl"
                     )
         
-        # Show final statistics
+        # Final statistics if available
         if "final_values" in result:
             st.markdown("---")
             st.markdown("#### Final Statistics")
             final_vals = result["final_values"]
             num_agents_display = result.get("num_agents", 3)
             
-            # Display metrics in a grid
             num_cols = min(3, len(final_vals))
             cols = st.columns(num_cols)
             for idx, (key, value) in enumerate(final_vals.items()):
                 with cols[idx % num_cols]:
-                    # Format key nicely: agent_1_vs_2 -> Agent 1 vs 2
                     display_key = key.replace('agent_', 'Agent ').replace('_vs_', ' vs ')
                     st.metric(display_key, f"{value:.4f}")
     
-    else:
-        st.info("👆 Run a simulation to see visualizations here.")
+    # Create tabs for each improvement type
+    tab1, tab2, tab3 = st.tabs(["Uniform", "Weaker", "Stronger"])
+    
+    with tab1:
+        display_results_for_type("uniform")
+    
+    with tab2:
+        display_results_for_type("weaker")
+    
+    with tab3:
+        display_results_for_type("stronger")
 
 
 def render_differentiable_lotto_tab():
