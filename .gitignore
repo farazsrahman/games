@@ -72,8 +72,6 @@ ehthumbs.db
 Thumbs.db
 
 # Project specific - generated outputs
-demos/**/*.gif
-demos/**/*.png
 debug.png
 descent.gif
 *.log
