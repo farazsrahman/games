@@ -24,19 +24,33 @@ from games.llms.config_llm import (
     OPT_SYSTEM_PROMPT
 )
 
+"""
+#TODO
+simulate user with LLM 
+change up questions to be more realistic 
+
+to properly run PSRO should be comparing each new agent to all previous agents and saving user preferences at each agent training
+so at end for EGS shouldn't need to run all at once, shou.d all already be saved foerm previous pSRO necessary preferences 
+
+try 10 interactive experiment with stronger to see if convex hull diff 
+maybe try with 5 agents first? 
+
+weaker convex hull area should be larger than stronger convex hull area 
+try changing up the questions to be more realistic 
+"""
+
 # ============================================================================
 # DEFAULT QUESTIONS
 # ============================================================================
 
 DEFAULT_QUESTIONS = [
-    "What is the meaning of life?",
-    "How can we reduce climate change?",
-    "What makes a good friend?",
-    "Explain quantum computing in simple terms.",
-    "What are the ethical implications of AI?",
-    "How do you write a compelling story?",
-    "What is the best way to learn a new language?",
-    "How can we improve education systems?",
+    "How can I reduce stress during exam season?",
+    "Give me a recipe for pancakes with only 5 ingredients.",
+    "What is the intuition behind eigenvalues?",
+    "Draft a polite email asking for an extension on an assignment.",
+    "Which is better for a beginner: Java or Python?",
+    "Give me a bullet-point summary of the causes of World War I.",
+    "Explain game theory to me.",
     "What are the key principles of good design?",
     "How do you build trust in relationships?",
 ]
@@ -223,6 +237,68 @@ def simulate_user_choice(
     else:
         return "B"
 
+
+def simulate_user_choice_llm(
+    answer_a: str,
+    answer_b: str,
+    question: str,
+    user_persona: str = "You are a helpful user evaluating answers to questions.",
+    call_site: str = "simulate_user_choice_llm"
+) -> str:
+    """
+    Simulate which answer the user would choose using an LLM with a persona.
+    
+    Args:
+        answer_a: First answer to compare
+        answer_b: Second answer to compare
+        question: The question being answered
+        user_persona: Description of the user persona (e.g., "You are a 20 year old college student majoring in computer science at UPenn")
+        call_site: Identifier for tracking
+    
+    Returns:
+        "A", "B", or "TIE"
+    """
+    from games.llms.config_llm import call_model
+    
+    prompt = f"""{user_persona}
+
+You are evaluating two answers to the following question:
+
+Question: {question}
+
+Answer A:
+{answer_a}
+
+Answer B:
+{answer_b}
+
+Which answer do you prefer? You must respond with exactly one of the following:
+- "A" if you prefer Answer A
+- "B" if you prefer Answer B
+- "TIE" if you have no preference or both answers are equally good
+
+Your response (A, B, or TIE):"""
+    
+    response = call_model(prompt, call_site)
+    response = response.strip().upper()
+    
+    # Extract A, B, or TIE from response
+    if "A" in response and "B" not in response and "TIE" not in response:
+        return "A"
+    elif "B" in response and "A" not in response and "TIE" not in response:
+        return "B"
+    elif "TIE" in response:
+        return "TIE"
+    else:
+        # Fallback: try to parse more carefully
+        if response.startswith("A"):
+            return "A"
+        elif response.startswith("B"):
+            return "B"
+        else:
+            # Default to TIE if unclear
+            return "TIE"
+
 # ============================================================================
 # USER EVALUATOR INTERFACE
 # ============================================================================
@@ -252,6 +328,22 @@ class SimulatedUserEvaluator(UserEvaluator):
                  agent_a_idx: int, agent_b_idx: int) -> str:
         """Evaluate using simulated preferences."""
         return simulate_user_choice(answer_a, answer_b, self.user_prefs, question)
+
+
+class LLMUserEvaluator(UserEvaluator):
+    """LLM-based user evaluator using a persona prompt."""
+    
+    def __init__(self, user_persona: str = "You are a helpful user evaluating answers to questions."):
+        """
+        Args:
+            user_persona: Description of the user persona (e.g., "You are a 20 year old college student majoring in computer science at UPenn")
+        """
+        self.user_persona = user_persona
+    
+    def evaluate(self, answer_a: str, answer_b: str, question: str,
+                 agent_a_idx: int, agent_b_idx: int) -> str:
+        """Evaluate using LLM with persona."""
+        return simulate_user_choice_llm(answer_a, answer_b, question, self.user_persona, f"llm_user_eval_{agent_a_idx}_{agent_b_idx}")
 
 
 class InteractiveUserEvaluator(UserEvaluator):

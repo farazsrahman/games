@@ -11,7 +11,7 @@ EXPERIMENT PARAMETERS
 --------------------------------------------------------------------------------
 
 Number of Agents: 20
-Improvement Method: weaker
+Improvement Method: uniform
 Games per Agent (for improvement): 1
 Questions per Agent Pair (for EGS matrix): 3
 User Mode: SIMULATED
@@ -50,8 +50,8 @@ Empathy: 0.8922
 FILE LOCATIONS
 --------------------------------------------------------------------------------
 
-Experiment Directory: out/llm_competition/agents_20_method_weaker_mode_simulated_questions_3
-Subfolder: agents_20_method_weaker_mode_simulated_questions_3
+Experiment Directory: out/llm_competition/agents_20_method_uniform_mode_simulated_questions_3
+Subfolder: agents_20_method_uniform_mode_simulated_questions_3
 
 --------------------------------------------------------------------------------
 ADDITIONAL NOTES

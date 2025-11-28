@@ -3,7 +3,7 @@
   "experiment_params": {
     "n_agents": 20,
     "n_games_per_agent": 1,
-    "improvement_method": "weaker",
+    "improvement_method": "uniform",
     "training_history_length": 18,
     "total_games_played": 18,
     "n_questions_per_pair": 3,
@@ -31,5 +31,5 @@
     "preferences": "out/llm_competition/agents_20_method_weaker_mode_simulated_questions_3/llm_competition_20251125_161021_user_prefs.json"
   },
   "user_mode": "simulated",
-  "subfolder": "agents_20_method_weaker_mode_simulated_questions_3"
+  "subfolder": "agents_20_method_uniform_mode_simulated_questions_3"
 }
