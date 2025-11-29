@@ -5,10 +5,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from PIL import Image
-from typing import List, Optional
+from typing import List, Optional, Dict
 from tqdm import tqdm
 
 from games.blotto.blotto import BlottoAgent, index_to_allocation
+from games.egs import EmpiricalGS, visualize_egs_matrix_and_embeddings
 
 
 def get_agent_probabilities(agent: BlottoAgent) -> np.ndarray:
@@ -102,8 +103,15 @@ def gif_from_population(
         fig, ax1 = plt.subplots(1, 1, figsize=(10, 6), dpi=dpi)
         ax2 = None
     
-    # Set up bar chart
-    battlefields = ['Battlefield 1', 'Battlefield 2', 'Battlefield 3']
+    # Set up bar chart - dynamically determine number of battlefields from first agent
+    if len(agents_history[0]) > 0:
+        n_battlefields = agents_history[0][0].n_battlefields
+        budget = agents_history[0][0].budget
+    else:
+        n_battlefields = 3
+        budget = 10
+    
+    battlefields = [f'Battlefield {i+1}' for i in range(n_battlefields)]
     x = np.arange(len(battlefields))
     width = 0.8 / N  # Width of bars, divided by number of agents
     
@@ -136,7 +144,8 @@ def gif_from_population(
         ax1.set_xticklabels(battlefields)
         ax1.legend(loc='upper right')
         ax1.grid(True, alpha=0.3, axis='y')
-        ax1.set_ylim(0, 10)
+        # Set y-axis limit based on budget (with some padding)
+        ax1.set_ylim(0, budget * 1.1)
         
         # Add value labels on bars
         texts = []
@@ -297,3 +306,256 @@ def gif_from_matchups(
     
     return path
 
+
+def plot_gamescape_matrix(
+    game,
+    agents: List[BlottoAgent],
+    output_path: str,
+    n_rounds: int = 1000,
+    dpi: int = 120
+) -> str:
+    """
+    Create a heatmap showing payoffs between all agent pairs (gamescape matrix).
+    
+    Args:
+        game: BlottoGame instance
+        agents: List of agents
+        output_path: Path to save the plot
+        n_rounds: Number of rounds per evaluation
+        dpi: Figure DPI
+        
+    Returns:
+        Path to saved plot
+    """
+    N = len(agents)
+    if N < 2:
+        raise ValueError("Need at least 2 agents for gamescape matrix")
+    
+    # Compute payoff matrix
+    payoff_matrix = np.zeros((N, N))
+    
+    for i in range(N):
+        for j in range(N):
+            if i == j:
+                # Agent vs itself = tie (0.5)
+                payoff_matrix[i, j] = 0.5
+            else:
+                # Compute payoff for agent i vs agent j
+                payoff = game.play(agents[i], agents[j], n_rounds=n_rounds)
+                payoff_matrix[i, j] = payoff
+    
+    # Create heatmap
+    fig, ax = plt.subplots(figsize=(max(8, N * 0.8), max(6, N * 0.7)), dpi=dpi)
+    
+    # Use diverging colormap centered at 0.5
+    # Shift values so 0.5 is at center: map [0, 1] -> [-0.5, 0.5] -> [0, 1] for colormap
+    shifted_matrix = payoff_matrix - 0.5  # Center at 0
+    im = ax.imshow(shifted_matrix, cmap='RdYlGn', aspect='auto', 
+                   vmin=-0.5, vmax=0.5, interpolation='nearest')
+    
+    # Add text annotations
+    for i in range(N):
+        for j in range(N):
+            text_color = 'white' if abs(shifted_matrix[i, j]) > 0.15 else 'black'
+            ax.text(j, i, f'{payoff_matrix[i, j]:.3f}',
+                   ha='center', va='center', color=text_color, fontsize=10)
+    
+    # Set labels
+    ax.set_xticks(range(N))
+    ax.set_yticks(range(N))
+    ax.set_xticklabels([f'Agent {i+1}' for i in range(N)])
+    ax.set_yticklabels([f'Agent {i+1}' for i in range(N)])
+    ax.set_xlabel('Opponent', fontsize=12)
+    ax.set_ylabel('Agent', fontsize=12)
+    ax.set_title('Gamescape Matrix: Payoff Between Agent Pairs', fontsize=14, pad=20)
+    
+    # Add colorbar with custom labels
+    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label('Payoff (Agent i)', rotation=270, labelpad=20, fontsize=11)
+    # Set custom tick labels for colorbar
+    cbar.set_ticks([-0.5, -0.25, 0, 0.25, 0.5])
+    cbar.set_ticklabels(['0.0', '0.25', '0.5', '0.75', '1.0'])
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=dpi, bbox_inches='tight')
+    plt.close(fig)
+    
+    return output_path
+
+
+def plot_all_egs_visualizations(
+    game,
+    agents: List[BlottoAgent],
+    output_dir: str,
+    base_name: str = "egs",
+    n_rounds: int = 1000,
+    dpi: int = 150
+) -> Dict[str, str]:
+    """
+    Generate all EGS visualizations: matrix + PCA, Schur, SVD, and t-SNE embeddings.
+    
+    Args:
+        game: BlottoGame instance
+        agents: List of agents
+        output_dir: Directory to save the plots
+        base_name: Base name for output files
+        n_rounds: Number of rounds per evaluation
+        dpi: Figure DPI
+        
+    Returns:
+        Dictionary mapping embedding method names to file paths
+    """
+    import os
+    from pathlib import Path
+    
+    N = len(agents)
+    if N < 2:
+        raise ValueError("Need at least 2 agents for 2D embeddings")
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Compute payoff matrix (win rates in [0, 1])
+    payoff_matrix = np.zeros((N, N))
+    for i in range(N):
+        for j in range(N):
+            if i == j:
+                payoff_matrix[i, j] = 0.5  # Agent vs itself = tie
+            else:
+                payoff = game.play(agents[i], agents[j], n_rounds=n_rounds)
+                payoff_matrix[i, j] = payoff
+    
+    # Convert to antisymmetric EGS matrix (centered at 0, zero-sum)
+    egs_matrix = payoff_matrix - 0.5  # Center at 0
+    egs_matrix = (egs_matrix - egs_matrix.T) / 2  # Make antisymmetric
+    
+    # Create EmpiricalGS instance
+    try:
+        gamescape = EmpiricalGS(egs_matrix)
+    except AssertionError:
+        # Fallback: create a minimal valid EGS matrix
+        egs_matrix_fallback = np.zeros((N, N))
+        for i in range(N):
+            for j in range(i + 1, N):
+                val = payoff_matrix[i, j] - 0.5
+                egs_matrix_fallback[i, j] = val
+                egs_matrix_fallback[j, i] = -val
+        gamescape = EmpiricalGS(egs_matrix_fallback)
+    
+    # Generate all embedding methods
+    methods = ["PCA", "SVD", "schur", "tSNE"]
+    output_paths = {}
+    
+    for method in methods:
+        try:
+            # Get embeddings based on method
+            if method.lower() == "pca":
+                coords_2d = gamescape.PCA_embeddings()
+            elif method.lower() == "svd":
+                coords_2d = gamescape.SVD_embeddings()
+            elif method.lower() == "schur":
+                coords_2d = gamescape.schur_embeddings()
+            elif method.lower() == "tsne":
+                coords_2d = gamescape.tSNE_embeddings()
+            else:
+                continue
+            
+            # Create output path (use absolute path to avoid issues)
+            output_path = os.path.abspath(os.path.join(output_dir, f"{base_name}_{method.lower()}.png"))
+            
+            # Generate visualization
+            visualize_egs_matrix_and_embeddings(gamescape, coords_2d, save_path=output_path, dpi=dpi)
+            output_paths[method] = output_path
+            
+        except Exception as e:
+            print(f"Warning: Could not generate {method} visualization: {e}")
+            continue
+    
+    return output_paths
+
+
+def plot_2d_embeddings(
+    game,
+    agents: List[BlottoAgent],
+    output_path: str,
+    n_rounds: int = 1000,
+    dpi: int = 120,
+    embedding_method: str = "PCA",
+    show_convex_hull: bool = False
+) -> str:
+    """
+    Create a combined visualization of the gamescape matrix and 2D embeddings using Empirical Gamescape methods.
+    Uses the payoff matrix to embed agents based on their game-theoretic relationships.
+    This function uses visualize_egs_matrix_and_embeddings from egs.py for the visualization.
+    
+    Args:
+        game: BlottoGame instance
+        agents: List of agents
+        output_path: Path to save the plot
+        n_rounds: Number of rounds per evaluation
+        dpi: Figure DPI
+        embedding_method: Method to use ("PCA", "SVD", "schur", or "tSNE")
+        show_convex_hull: Whether to draw convex hull around points (always shown if >= 3 agents)
+        
+    Returns:
+        Path to saved plot
+    """
+    N = len(agents)
+    if N < 2:
+        raise ValueError("Need at least 2 agents for 2D embeddings")
+    
+    # Compute payoff matrix (win rates in [0, 1])
+    payoff_matrix = np.zeros((N, N))
+    for i in range(N):
+        for j in range(N):
+            if i == j:
+                payoff_matrix[i, j] = 0.5  # Agent vs itself = tie
+            else:
+                payoff = game.play(agents[i], agents[j], n_rounds=n_rounds)
+                payoff_matrix[i, j] = payoff
+    
+    # Convert to antisymmetric EGS matrix (centered at 0, zero-sum)
+    # EGS matrix: egs[i,j] = payoff[i,j] - 0.5, then make antisymmetric
+    egs_matrix = payoff_matrix - 0.5  # Center at 0
+    egs_matrix = (egs_matrix - egs_matrix.T) / 2  # Make antisymmetric
+    
+    # Create EmpiricalGS instance and get embeddings
+    try:
+        gamescape = EmpiricalGS(egs_matrix)
+        
+        # Get embeddings based on method
+        if embedding_method.lower() == "pca":
+            coords_2d = gamescape.PCA_embeddings()
+        elif embedding_method.lower() == "svd":
+            coords_2d = gamescape.SVD_embeddings()
+        elif embedding_method.lower() == "schur":
+            coords_2d = gamescape.schur_embeddings()
+        elif embedding_method.lower() == "tsne":
+            coords_2d = gamescape.tSNE_embeddings()
+        else:
+            raise ValueError(f"Unknown embedding method: {embedding_method}. Use 'PCA', 'SVD', 'schur', or 'tSNE'")
+    except (AssertionError, ValueError) as e:
+        # If matrix validation fails, fall back to simple PCA on payoff matrix
+        from sklearn.decomposition import PCA
+        pca = PCA(n_components=2)
+        coords_2d = pca.fit_transform(payoff_matrix)
+        embedding_method = "PCA (fallback)"
+        # Try to recreate gamescape with fallback matrix
+        try:
+            egs_matrix_fallback = payoff_matrix - 0.5
+            egs_matrix_fallback = (egs_matrix_fallback - egs_matrix_fallback.T) / 2
+            gamescape = EmpiricalGS(egs_matrix_fallback)
+        except AssertionError:
+            # If even the fallback fails, create a minimal valid EGS matrix
+            egs_matrix_fallback = np.zeros((N, N))
+            for i in range(N):
+                for j in range(i + 1, N):
+                    val = payoff_matrix[i, j] - 0.5
+                    egs_matrix_fallback[i, j] = val
+                    egs_matrix_fallback[j, i] = -val
+            gamescape = EmpiricalGS(egs_matrix_fallback)
+    
+    # Use the visualize_egs_matrix_and_embeddings function from egs.py
+    # This creates the side-by-side visualization with matrix and embeddings
+    visualize_egs_matrix_and_embeddings(gamescape, coords_2d, save_path=output_path, dpi=dpi)
+    
+    return output_path

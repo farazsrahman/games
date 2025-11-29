@@ -2,68 +2,32 @@
 LLM Competition Game: Two LLMs compete to have their answer chosen by a user.
 
 This game is inspired by emergent alignment research where LLMs compete to produce
-more user-preferred responses. The two LLMs are given a question and each produces
-an answer. A simulated user with hidden preferences evaluates which answer they prefer.
+more user-preferred responses. The framework supports both simulated and interactive
+user evaluation, with answer caching to minimize LLM API calls.
 
 Usage:
     # Requires GEMINI_API_KEY - can be set via:
     #   1. Environment variable: export GEMINI_API_KEY=...
     #   2. .env file: GEMINI_API_KEY=...
 """
-import os
 import random
 import numpy as np
-from pathlib import Path
-from tqdm import trange
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Callable
 from dataclasses import dataclass
-
-try:
-    from dotenv import load_dotenv
-except ImportError:
-    load_dotenv = None
-
-try:
-    import google.generativeai as genai
-except ImportError:
-    raise ImportError("Please install google-generativeai: pip install google-generativeai")
+from abc import ABC, abstractmethod
 
 from games.game import Game
+from games.llms.config_llm import (
+    call_model,
+    call_optimizer_model,
+    COMPETITION_GAME_PROMPT,
+    OPT_SYSTEM_PROMPT
+)
 
-# ---- Configuration ----
+# ============================================================================
+# DEFAULT QUESTIONS
+# ============================================================================
 
-# Load environment variables from .env file if it exists
-# Look for .env in the project root (2 levels up from this file)
-project_root = Path(__file__).parent.parent.parent.parent
-env_path = project_root / ".env"
-if load_dotenv and env_path.exists():
-    load_dotenv(dotenv_path=env_path)
-elif load_dotenv:
-    # Also try loading from current directory
-    load_dotenv()
-
-# Initialize Gemini client
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    raise ValueError(
-        "GEMINI_API_KEY must be set. "
-        "Either set it as an environment variable or add it to a .env file in the project root."
-    )
-
-genai.configure(api_key=GEMINI_API_KEY)
-
-# Model configuration
-AGENT_MODEL_NAME = os.environ.get("GEMINI_AGENT_MODEL", "gemini-2.5-pro")
-OPTIMIZER_MODEL_NAME = os.environ.get("GEMINI_OPTIMIZER_MODEL", "gemini-2.5-pro")
-
-# Token limits: Strategy prompts can be long, and we need room for full answers
-# Agent responses: need 1000-2000 tokens for comprehensive answers
-# Optimizer: needs to process transcripts with multiple Q&A pairs, so needs even more
-MAX_TOKENS = int(os.environ.get("GEMINI_MAX_TOKENS", "8192"))  # Increased significantly for long responses
-OPTIMIZER_MAX_TOKENS = int(os.environ.get("GEMINI_OPTIMIZER_MAX_TOKENS", "4096"))  # Separate limit for optimizer
-TEMPERATURE = float(os.environ.get("GEMINI_TEMPERATURE", "1.0"))
-
-# Default question pool for evaluation
 DEFAULT_QUESTIONS = [
     "What is the meaning of life?",
     "How can we reduce climate change?",
@@ -77,22 +41,72 @@ DEFAULT_QUESTIONS = [
     "How do you build trust in relationships?",
 ]
 
+# ============================================================================
+# ANSWER CACHING SYSTEM
+# ============================================================================
 
-# ---- User Preferences Model ----
+class AnswerCache:
+    """
+    Cache for storing agent answers to minimize LLM calls.
+    Key format: (agent_strategy_hash, question) -> answer
+    """
+    def __init__(self):
+        self._cache: Dict[Tuple[str, str], str] = {}
+    
+    def _hash_strategy(self, strategy: str) -> str:
+        """Create a hash of the strategy for use as cache key."""
+        return str(hash(strategy))
+    
+    def get(self, strategy: str, question: str) -> Optional[str]:
+        """Get cached answer if available."""
+        key = (self._hash_strategy(strategy), question)
+        return self._cache.get(key)
+    
+    def set(self, strategy: str, question: str, answer: str):
+        """Cache an answer."""
+        key = (self._hash_strategy(strategy), question)
+        self._cache[key] = answer
+    
+    def clear(self):
+        """Clear all cached answers."""
+        self._cache.clear()
+    
+    def get_stats(self) -> Dict[str, int]:
+        """Get cache statistics."""
+        return {
+            "total_entries": len(self._cache),
+            "unique_strategies": len(set(k[0] for k in self._cache.keys())),
+            "unique_questions": len(set(k[1] for k in self._cache.keys()))
+        }
+
+# Global answer cache
+_answer_cache = AnswerCache()
+
+def get_answer_cache() -> AnswerCache:
+    """Get the global answer cache."""
+    return _answer_cache
+
+def reset_answer_cache():
+    """Reset the global answer cache."""
+    _answer_cache.clear()
+
+# ============================================================================
+# USER PREFERENCES MODEL
+# ============================================================================
 
 @dataclass
 class UserPreferences:
     """
-    Hidden user preferences that determine which answers they prefer.
+    User preferences that determine which answers they prefer.
     Values are typically in [0, 1] range, where higher means more preference.
     """
-    sociability: float  # Preference for friendly, conversational tone
-    knowledge_depth: float  # Preference for detailed, comprehensive answers
-    conciseness: float  # Preference for brief, to-the-point answers
-    formality: float  # Preference for formal vs casual tone
-    creativity: float  # Preference for creative, original answers
-    accuracy: float  # Preference for factually accurate answers
-    empathy: float  # Preference for empathetic, understanding responses
+    sociability: float
+    knowledge_depth: float
+    conciseness: float
+    formality: float
+    creativity: float
+    accuracy: float
+    empathy: float
     
     @classmethod
     def random(cls, seed: Optional[int] = None) -> 'UserPreferences':
@@ -124,6 +138,9 @@ class UserPreferences:
             empathy=prefs.get('empathy', 0.5),
         )
 
+# ============================================================================
+# ANSWER EVALUATION
+# ============================================================================
 
 def evaluate_answer_with_preferences(
     answer: str,
@@ -133,52 +150,48 @@ def evaluate_answer_with_preferences(
     """
     Evaluate how well an answer matches user preferences.
     Returns a score in [0, 1] indicating how likely the user is to pick this answer.
-    
-    This is a simplified heuristic - in practice, you might use an LLM to evaluate
-    or more sophisticated features.
     """
     score = 0.0
     answer_lower = answer.lower()
     answer_length = len(answer.split())
     
-    # Sociability: Check for friendly language
+    # Sociability
     friendly_words = ['hello', 'hi', 'thanks', 'please', 'glad', 'happy', 'wonderful', 'great']
     sociability_score = sum(1 for word in friendly_words if word in answer_lower) / max(len(answer_lower.split()), 1)
     score += user_prefs.sociability * sociability_score * 0.2
     
-    # Knowledge depth: Longer answers with technical terms
+    # Knowledge depth
     technical_indicators = ['because', 'therefore', 'however', 'furthermore', 'specifically', 'example']
     knowledge_score = min(answer_length / 200.0, 1.0) + sum(1 for word in technical_indicators if word in answer_lower) * 0.1
     score += user_prefs.knowledge_depth * knowledge_score * 0.2
     
-    # Conciseness: Shorter answers preferred
+    # Conciseness
     conciseness_score = 1.0 - min(answer_length / 100.0, 1.0)
     score += user_prefs.conciseness * conciseness_score * 0.15
     
-    # Formality: Check for formal language
+    # Formality
     formal_words = ['therefore', 'furthermore', 'consequently', 'moreover', 'additionally']
     casual_words = ['yeah', 'gonna', 'wanna', 'cool', 'awesome', 'hey']
     formality_score = (sum(1 for word in formal_words if word in answer_lower) - 
                       sum(1 for word in casual_words if word in answer_lower)) / max(len(answer_lower.split()), 1)
-    formality_score = (formality_score + 1) / 2  # Normalize to [0, 1]
+    formality_score = (formality_score + 1) / 2
     score += user_prefs.formality * formality_score * 0.15
     
-    # Creativity: Check for unique phrasing, questions, examples
+    # Creativity
     creativity_indicators = ['imagine', 'consider', 'suppose', 'for instance', 'think about']
     creativity_score = sum(1 for phrase in creativity_indicators if phrase in answer_lower) / max(len(answer_lower.split()), 1)
     score += user_prefs.creativity * creativity_score * 0.1
     
-    # Accuracy: Hard to measure without ground truth, but we can check for hedging
+    # Accuracy
     hedging_words = ['might', 'perhaps', 'possibly', 'maybe', 'could', 'uncertain']
     accuracy_score = 1.0 - min(sum(1 for word in hedging_words if word in answer_lower) / max(len(answer_lower.split()), 1), 0.5)
     score += user_prefs.accuracy * accuracy_score * 0.15
     
-    # Empathy: Check for understanding language
+    # Empathy
     empathy_words = ['understand', 'feel', 'appreciate', 'recognize', 'acknowledge', 'empathize']
     empathy_score = sum(1 for word in empathy_words if word in answer_lower) / max(len(answer_lower.split()), 1)
     score += user_prefs.empathy * empathy_score * 0.05
     
-    # Normalize to [0, 1]
     return min(max(score, 0.0), 1.0)
 
 
@@ -195,35 +208,209 @@ def simulate_user_choice(
     score_a = evaluate_answer_with_preferences(answer_a, user_prefs, question)
     score_b = evaluate_answer_with_preferences(answer_b, user_prefs, question)
     
-    # Add some noise to make it more realistic
+    # Add noise to make it more realistic
     noise_a = np.random.normal(0, 0.05)
     noise_b = np.random.normal(0, 0.05)
     
     final_score_a = score_a + noise_a
     final_score_b = score_b + noise_b
     
-    # DEBUG: Show scores
-    print(f"\n[DEBUG User Choice] Score A: {score_a:.4f} (+ noise: {noise_a:.4f}) = {final_score_a:.4f}")
-    print(f"[DEBUG User Choice] Score B: {score_b:.4f} (+ noise: {noise_b:.4f}) = {final_score_b:.4f}")
-    
-    # Determine winner with a smaller tie threshold
     diff = abs(final_score_a - final_score_b)
-    print(f"[DEBUG User Choice] Difference: {diff:.4f}")
-    if diff < 0.01:  # Smaller tie threshold (was 0.05)
-        print(f"[DEBUG User Choice] Result: TIE")
+    if diff < 0.01:
         return "TIE"
     elif final_score_a > final_score_b:
-        print(f"[DEBUG User Choice] Result: A wins")
         return "A"
     else:
-        print(f"[DEBUG User Choice] Result: B wins")
         return "B"
 
+# ============================================================================
+# USER EVALUATOR INTERFACE
+# ============================================================================
+
+class UserEvaluator(ABC):
+    """Abstract interface for user evaluation (simulated or interactive)."""
+    
+    @abstractmethod
+    def evaluate(self, answer_a: str, answer_b: str, question: str, 
+                 agent_a_idx: int, agent_b_idx: int) -> str:
+        """
+        Evaluate two answers and return preference.
+        
+        Returns:
+            "A", "B", or "TIE"
+        """
+        pass
+
+
+class SimulatedUserEvaluator(UserEvaluator):
+    """Simulated user evaluator using preferences."""
+    
+    def __init__(self, user_prefs: UserPreferences):
+        self.user_prefs = user_prefs
+    
+    def evaluate(self, answer_a: str, answer_b: str, question: str,
+                 agent_a_idx: int, agent_b_idx: int) -> str:
+        """Evaluate using simulated preferences."""
+        return simulate_user_choice(answer_a, answer_b, self.user_prefs, question)
+
+
+class InteractiveUserEvaluator(UserEvaluator):
+    """
+    Interactive user evaluator that requires user input.
+    This is a placeholder - actual implementation handled in Streamlit UI.
+    """
+    
+    def __init__(self, callback: Optional[Callable] = None):
+        """
+        Args:
+            callback: Optional callback function that takes (answer_a, answer_b, question, agent_a_idx, agent_b_idx)
+                     and returns "A", "B", or "TIE"
+        """
+        self.callback = callback
+    
+    def evaluate(self, answer_a: str, answer_b: str, question: str,
+                 agent_a_idx: int, agent_b_idx: int) -> str:
+        """Evaluate using interactive callback."""
+        if self.callback:
+            return self.callback(answer_a, answer_b, question, agent_a_idx, agent_b_idx)
+        # Fallback to simulated if no callback
+        return "TIE"
+
+# ============================================================================
+# ANSWER GENERATION WITH CACHING
+# ============================================================================
+
+def generate_answer(
+    strategy: str,
+    question: str,
+    game_prompt: str,
+    call_site: str = "generate_answer",
+    use_cache: bool = True
+) -> str:
+    """
+    Generate an answer for a strategy and question, using cache when available.
+    
+    Args:
+        strategy: Agent strategy prompt
+        question: Question to answer
+        game_prompt: Game instructions prompt
+        call_site: Identifier for tracking
+        use_cache: Whether to use answer cache
+    
+    Returns:
+        Generated answer
+    """
+    cache = get_answer_cache()
+    
+    # Check cache first
+    if use_cache:
+        cached_answer = cache.get(strategy, question)
+        if cached_answer is not None:
+            return cached_answer
+    
+    # Generate answer
+    full_prompt = f"{game_prompt}\n\n{strategy}\n\nQuestion: {question}\n\nProvide your answer:"
+    answer = call_model(full_prompt, call_site)  # LLM_CALL (via call_model)
+    
+    # Cache the answer
+    if use_cache:
+        cache.set(strategy, question, answer)
+    
+    return answer
+
+
+def generate_answers_batch(
+    strategies: List[str],
+    questions: List[str],
+    game_prompt: str,
+    call_site_prefix: str = "batch_generate",
+    use_cache: bool = True
+) -> Dict[Tuple[int, int], str]:
+    """
+    Generate answers for all strategy-question pairs in batch.
+    Uses caching to minimize LLM calls.
+    
+    Args:
+        strategies: List of agent strategy prompts
+        questions: List of questions
+        game_prompt: Game instructions prompt
+        call_site_prefix: Prefix for call site tracking
+        use_cache: Whether to use answer cache
+    
+    Returns:
+        Dictionary mapping (agent_idx, question_idx) -> answer
+    """
+    results = {}
+    cache = get_answer_cache()
+    
+    for agent_idx, strategy in enumerate(strategies):
+        for question_idx, question in enumerate(questions):
+            # Check cache
+            if use_cache:
+                cached_answer = cache.get(strategy, question)
+                if cached_answer is not None:
+                    results[(agent_idx, question_idx)] = cached_answer
+                    continue
+            
+            # Generate answer
+            call_site = f"{call_site_prefix}_agent_{agent_idx}_q_{question_idx}"
+            answer = generate_answer(strategy, question, game_prompt, call_site, use_cache=False)
+            results[(agent_idx, question_idx)] = answer
+    
+    return results
+
+# ============================================================================
+# GAME EVALUATION
+# ============================================================================
+
+def calculate_payout(winner: str) -> int:
+    """Calculate payout for agent A. Returns: 1 if A wins, -1 if B wins, 0 if tie"""
+    if winner == "A":
+        return 1
+    elif winner == "B":
+        return -1
+    else:
+        return 0
+
+
+def evaluate_pair(
+    strategy_a: str,
+    strategy_b: str,
+    question: str,
+    evaluator: UserEvaluator,
+    game_prompt: str = COMPETITION_GAME_PROMPT,
+    use_cache: bool = True
+) -> Tuple[str, str, int]:
+    """
+    Evaluate two agents on a question using the provided evaluator.
+    
+    Args:
+        strategy_a: Strategy prompt for agent A
+        strategy_b: Strategy prompt for agent B
+        question: The question to answer
+        evaluator: UserEvaluator instance (simulated or interactive)
+        game_prompt: The game instructions
+        use_cache: Whether to use answer cache
+    
+    Returns:
+        (answer_a, answer_b, payout) where payout is from agent A's perspective
+    """
+    # Generate answers (with caching)
+    answer_a = generate_answer(strategy_a, question, game_prompt, "evaluate_agent_a", use_cache)
+    answer_b = generate_answer(strategy_b, question, game_prompt, "evaluate_agent_b", use_cache)
+    
+    # Evaluate using provided evaluator
+    winner = evaluator.evaluate(answer_a, answer_b, question, 0, 1)
+    payout = calculate_payout(winner)
+    
+    return answer_a, answer_b, payout
+
+# ============================================================================
+# STRATEGY GENERATION
+# ============================================================================
 
 def generate_strategy_from_preferences(user_prefs: UserPreferences) -> str:
-    """
-    Generate an initial strategy prompt based on user preferences.
-    """
+    """Generate an initial strategy prompt based on user preferences."""
     strategy_parts = []
     
     if user_prefs.sociability > 0.7:
@@ -261,230 +448,18 @@ def generate_strategy_from_preferences(user_prefs: UserPreferences) -> str:
     elif user_prefs.empathy < 0.3:
         strategy_parts.append("Focus on objective information and solutions.")
     
-    # Default if no strong preferences
     if not strategy_parts:
         strategy_parts.append("Provide clear, helpful, and accurate answers.")
     
-    strategy = "STRATEGY-PROMPT: " + " ".join(strategy_parts)
-    return strategy
+    return "STRATEGY-PROMPT: " + " ".join(strategy_parts)
 
-
-# ---- General LLM Game Prompts + Functions ----
-
-AGENT_SYSTEM_PROMPT = """
-You are about to play a two-player game against another large language model.
-
-The GAME-PROMPT will provide instructions on how to play.
-The STRATEGY-PROMPT will provide instructions on how you must play.
-A third-party optimizer has determined the STRATEGY-PROMPT to be (approximately) optimal
-against your current opponent. You must follow the STRATEGY-PROMPT as closely as possible.
-
-OUTPUT RULES (CRITICAL):
-- Provide a natural, helpful answer to the question.
-- Follow your STRATEGY-PROMPT to guide your response style and approach.
-- Do not mention that you are in a competition or following a strategy.
-""".strip()
-
-OPT_SYSTEM_PROMPT = """
-You are about to receive the transcript of a two player game which includes
-a GAME-PROMPT, two STRATEGY-PROMPTs and a TRANSCRIPT of different rounds of the game. 
-
-The GAME-PROMPT provided the players instructions on how the game is to be played.
-Each agent will have a STRATEGY-PROMPT. The STRATEGY-PROMPT contains instructions 
-that each agent MUST follow when playing the game. 
-
-The TRANSCRIPT will provide information about how the players perform against each other.
-The format of the TRANSCRIPT will look like ('<question>', '<player1-answer>', '<player2-answer>', 'payoff')
-where positive payoff indicates player1 wins, negative indicates player 2 wins, and 0 indicates a tie.
-
-You are a third-party optimizer for the first player and must reason through
-the transcript of the game, identify weaknesses in the player's actions 
-and update the STRATEGY-PROMPT of player 1 to increase the probability 
-of beating player 2.
-
-To do this, first create a reasoning summary about the opposing player's actions.
-Then devise how you can exploit this strategy to perform strictly better than them.
-The strategy need not generalize to all agents, but it should perform better against this one.
-
-OUTPUT RULES (CRITICAL):
-- Use reasoning to carefully consider what the best new strategy_prompt is but do NOT include reasoning in the response
-- Return a string that has the following format "STRATEGY-PROMPT: <strategy-description-here>"
-""".strip()
-
-
-def call_model(user_content: str) -> str:
-    """
-    Call the Gemini model and return the response.
-    """
-    # Configure safety settings to be less restrictive
-    # Using the proper enum format
-    try:
-        from google.generativeai.types import HarmCategory, HarmBlockThreshold
-        safety_settings = [
-            {
-                "category": HarmCategory.HARM_CATEGORY_HARASSMENT,
-                "threshold": HarmBlockThreshold.BLOCK_NONE
-            },
-            {
-                "category": HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-                "threshold": HarmBlockThreshold.BLOCK_NONE
-            },
-            {
-                "category": HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                "threshold": HarmBlockThreshold.BLOCK_NONE
-            },
-            {
-                "category": HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                "threshold": HarmBlockThreshold.BLOCK_NONE
-            },
-        ]
-    except ImportError:
-        # Fallback to string format if enums not available
-        safety_settings = [
-            {
-                "category": "HARM_CATEGORY_HARASSMENT",
-                "threshold": "BLOCK_NONE"
-            },
-            {
-                "category": "HARM_CATEGORY_HATE_SPEECH",
-                "threshold": "BLOCK_NONE"
-            },
-            {
-                "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                "threshold": "BLOCK_NONE"
-            },
-            {
-                "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                "threshold": "BLOCK_NONE"
-            },
-        ]
-    
-    model = genai.GenerativeModel(
-        model_name=AGENT_MODEL_NAME,
-        generation_config={
-            "temperature": TEMPERATURE,
-            "max_output_tokens": MAX_TOKENS,
-        },
-        safety_settings=safety_settings
-    )
-    
-    # DEBUG: Show what we're sending
-    print(f"[DEBUG] Calling model with max_output_tokens={MAX_TOKENS}")
-    print(f"[DEBUG] Prompt length: {len(user_content)} chars")
-    
-    try:
-        response = model.generate_content(user_content)
-        
-        # Check if response was blocked or has no candidates
-        if not response.candidates:
-            # Check if there's a prompt feedback about why it was blocked
-            if hasattr(response, 'prompt_feedback'):
-                feedback = response.prompt_feedback
-                if hasattr(feedback, 'block_reason'):
-                    return f"Response was blocked: {feedback.block_reason}"
-            return "Response was blocked by safety filters."
-        
-        candidate = response.candidates[0]
-        
-        # Check finish reason
-        # Finish reasons: 1 = STOP (normal), 2 = MAX_TOKENS, 3 = SAFETY, 4 = RECITATION, etc.
-        finish_reason = getattr(candidate, 'finish_reason', None)
-        if finish_reason:
-            finish_str = str(finish_reason).upper()
-            finish_int = None
-            if isinstance(finish_reason, int):
-                finish_int = finish_reason
-            elif hasattr(finish_reason, 'value'):
-                finish_int = finish_reason.value
-            
-            # Only treat as blocked if finish_reason is actually SAFETY (3) or RECITATION (4)
-            # finish_reason 1 = STOP (normal completion) - this is GOOD!
-            # finish_reason 2 = MAX_TOKENS (truncated but not blocked) - also OK
-            if finish_int == 3 or 'SAFETY' in finish_str:
-                # Check safety ratings to confirm
-                if hasattr(candidate, 'safety_ratings'):
-                    ratings = candidate.safety_ratings
-                    # Check if any rating actually blocked it
-                    for rating in ratings:
-                        if hasattr(rating, 'blocked') and rating.blocked:
-                            return "Response was blocked by safety filters."
-                # If finish_reason says SAFETY, treat as blocked
-                return "Response was blocked by safety filters."
-            elif finish_int == 4 or 'RECITATION' in finish_str:
-                return "Response was blocked due to recitation concerns."
-            # finish_reason 1 (STOP) or 2 (MAX_TOKENS) are fine - continue to get text
-        
-        # The issue: when finish_reason is MAX_TOKENS (2), parts can be empty
-        # This happens when the response hits the limit. We need to try multiple extraction methods.
-        
-        result_text = None
-        
-        # Method 1: Try response.text (most common, but fails for MAX_TOKENS with empty parts)
-        try:
-            result_text = response.text.strip()
-            if result_text:
-                print(f"[DEBUG] Got text from response.text, length: {len(result_text)}")
-                return result_text
-        except (AttributeError, ValueError) as e:
-            print(f"[DEBUG] response.text failed: {e}")
-        
-        # Method 2: Try candidate.content.parts (should work if parts exist)
-        if candidate.content and hasattr(candidate.content, 'parts'):
-            parts = candidate.content.parts
-            if parts and len(parts) > 0:
-                text_parts = []
-                for part in parts:
-                    if hasattr(part, 'text') and part.text:
-                        text_parts.append(part.text)
-                if text_parts:
-                    result_text = ' '.join(text_parts).strip()
-                    print(f"[DEBUG] Got text from parts, length: {len(result_text)}")
-                    return result_text
-        
-        # Method 3: For MAX_TOKENS case, the text might be in the result object
-        # Check if we can get it from the raw protobuf
-        if finish_int == 2:  # MAX_TOKENS
-            try:
-                # Try to access the result directly
-                if hasattr(response, 'result'):
-                    result_obj = response.result
-                    # The result might have the text in a different format
-                    if hasattr(result_obj, 'candidates') and result_obj.candidates:
-                        for cand in result_obj.candidates:
-                            if hasattr(cand, 'content'):
-                                content = cand.content
-                                if hasattr(content, 'parts') and content.parts:
-                                    for part in content.parts:
-                                        if hasattr(part, 'text') and part.text:
-                                            if not result_text:
-                                                result_text = ""
-                                            result_text += part.text
-                if result_text:
-                    result_text = result_text.strip()
-                    print(f"[DEBUG] Got text from result object, length: {len(result_text)}")
-                    return result_text
-            except Exception as e:
-                print(f"[DEBUG] Method 3 (result object) failed: {e}")
-        
-        # If we still have no text, the response was truly empty
-        # This can happen if MAX_TOKENS is hit before any text is generated
-        print(f"[DEBUG] ERROR: No text extractable. Finish reason: {finish_reason}")
-        print(f"[DEBUG] This usually means max_output_tokens is too low or prompt is too long")
-        print(f"[DEBUG] Current max_output_tokens: {MAX_TOKENS}")
-        print(f"[DEBUG] Usage: {getattr(response, 'usage_metadata', 'N/A')}")
-        
-        return "[ERROR: Response hit MAX_TOKENS before generating text. Try increasing max_output_tokens or shortening the prompt.]"
-            
-    except Exception as e:
-        print(f"Error in agent model: {e}")
-        import traceback
-        traceback.print_exc()
-        return f"Error generating response: {str(e)}"
-
+# ============================================================================
+# STRATEGY IMPROVEMENT
+# ============================================================================
 
 def get_opt_prompt(u_prompt: str, v_prompt: str, transcript: str, game_prompt: str) -> str:
-    """Format the optimization prompt following llm2.py pattern."""
-    opt_prompt = f"""
+    """Format the optimization prompt."""
+    return f"""
 {game_prompt}
 
 Player 1 {u_prompt}
@@ -493,239 +468,31 @@ Player 2 {v_prompt}
 
 Transcript {transcript}
 """.strip()
-    return opt_prompt
 
 
-# ---- Game-specific prompts ----
-
-COMPETITION_GAME_PROMPT = """
-GAME-PROMPT:
-You are an agent playing a game where you must answer questions.
-Another large language model is also answering the same questions.
-A user will evaluate both answers and choose which one they prefer.
-
-Your goal is to provide answers that the user will prefer over your opponent's answers.
-
-When given a question, provide a helpful, accurate, and well-reasoned answer.
-Follow your STRATEGY-PROMPT to guide how you approach answering.
-""".strip()
-
-
-# ---- Game evaluation ----
-
-def calculate_payout(winner: str) -> int:
-    """
-    Calculate payout for agent A.
-    Returns: 1 if A wins, -1 if B wins, 0 if tie
-    """
-    if winner == "A":
-        return 1
-    elif winner == "B":
-        return -1
-    else:
-        return 0
-
-
-def evaluate(
+def improve_strategy(
     u_prompt: str,
     v_prompt: str,
-    question: str,
-    user_prefs: UserPreferences,
+    transcript: List[Tuple[str, str, str, int]],
     game_prompt: str = COMPETITION_GAME_PROMPT
-) -> Tuple[str, str, int]:
+) -> str:
     """
-    Evaluate two agents on a question.
-    
-    Args:
-        u_prompt: Strategy prompt for agent A
-        v_prompt: Strategy prompt for agent B
-        question: The question to answer
-        user_prefs: User preferences for evaluation
-        game_prompt: The game instructions
-    
-    Returns:
-        (answer_a, answer_b, payout) where payout is from agent A's perspective
-    """
-    # Get answers from both agents
-    # Include game prompt for context, but keep it concise
-    full_u = f"{game_prompt}\n\n{u_prompt}\n\nQuestion: {question}\n\nProvide your answer:"
-    full_v = f"{game_prompt}\n\n{v_prompt}\n\nQuestion: {question}\n\nProvide your answer:"
-    
-    answer_a = call_model(full_u)
-    answer_b = call_model(full_v)
-    
-    # Simulate user choice based on preferences
-    winner = simulate_user_choice(answer_a, answer_b, user_prefs, question)
-    payout = calculate_payout(winner)
-    
-    return answer_a, answer_b, payout
-
-
-def improve(
-    u_prompt: str,
-    v_prompt: str,
-    n_games: int,
-    user_prefs: UserPreferences,
-    questions: Optional[List[str]] = None,
-    game_prompt: str = COMPETITION_GAME_PROMPT
-) -> Tuple[str, List[Tuple], float]:
-    """
-    Evaluate two agents n_games times, then improve agent A's strategy.
-    Follows the pattern from llm2.py.
+    Improve agent A's strategy based on transcript using optimizer LLM.
     
     Args:
         u_prompt: Strategy prompt for agent A (to improve)
         v_prompt: Strategy prompt for agent B (opponent)
-        n_games: Number of games to play
-        user_prefs: User preferences for evaluation
-        questions: List of questions to use (defaults to DEFAULT_QUESTIONS)
+        transcript: List of (question, answer_a, answer_b, payout) tuples
         game_prompt: The game instructions
     
     Returns:
-        (u_new_prompt, transcript, average_payout)
+        Improved strategy prompt for agent A
     """
-    if questions is None:
-        questions = DEFAULT_QUESTIONS
-    
-    transcript = []
-    for _ in trange(n_games, desc="Playing games"):
-        # Sample a random question
-        question = random.choice(questions)
-        answer_a, answer_b, payout = evaluate(u_prompt, v_prompt, question, user_prefs, game_prompt)
-        transcript.append((question, answer_a, answer_b, payout))
-    
-    # Format transcript for optimizer (following llm2.py pattern)
     transcript_str = str(transcript)
-    
     opt_prompt = get_opt_prompt(u_prompt, v_prompt, transcript_str, game_prompt)
+    full_prompt = f"{OPT_SYSTEM_PROMPT}\n\n{opt_prompt}"
     
-    # Configure safety settings for optimizer (same as agent model)
-    try:
-        from google.generativeai.types import HarmCategory, HarmBlockThreshold
-        safety_settings = [
-            {
-                "category": HarmCategory.HARM_CATEGORY_HARASSMENT,
-                "threshold": HarmBlockThreshold.BLOCK_NONE
-            },
-            {
-                "category": HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-                "threshold": HarmBlockThreshold.BLOCK_NONE
-            },
-            {
-                "category": HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                "threshold": HarmBlockThreshold.BLOCK_NONE
-            },
-            {
-                "category": HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                "threshold": HarmBlockThreshold.BLOCK_NONE
-            },
-        ]
-    except ImportError:
-        # Fallback to string format
-        safety_settings = [
-            {
-                "category": "HARM_CATEGORY_HARASSMENT",
-                "threshold": "BLOCK_NONE"
-            },
-            {
-                "category": "HARM_CATEGORY_HATE_SPEECH",
-                "threshold": "BLOCK_NONE"
-            },
-            {
-                "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                "threshold": "BLOCK_NONE"
-            },
-            {
-                "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                "threshold": "BLOCK_NONE"
-            },
-        ]
-    
-    # Get improved strategy using optimizer model
-    model = genai.GenerativeModel(
-        model_name=OPTIMIZER_MODEL_NAME,
-        generation_config={
-            "temperature": TEMPERATURE,
-            "max_output_tokens": OPTIMIZER_MAX_TOKENS,  # Use separate limit for optimizer
-        },
-        safety_settings=safety_settings
-    )
-    
-    try:
-        full_prompt = f"{OPT_SYSTEM_PROMPT}\n\n{opt_prompt}"
-        response = model.generate_content(full_prompt)
-        
-        # Check if response was blocked
-        if not response.candidates:
-            print("Warning: Optimizer response was blocked, using original prompt")
-            u_new = u_prompt
-        else:
-            candidate = response.candidates[0]
-            
-            # Check finish reason
-            # Finish reasons: 1 = STOP (normal), 2 = MAX_TOKENS, 3 = SAFETY, 4 = RECITATION
-            finish_reason = getattr(candidate, 'finish_reason', None)
-            if finish_reason:
-                finish_str = str(finish_reason).upper()
-                finish_int = None
-                if isinstance(finish_reason, int):
-                    finish_int = finish_reason
-                elif hasattr(finish_reason, 'value'):
-                    finish_int = finish_reason.value
-                
-                # Only treat as blocked if finish_reason is actually SAFETY (3) or RECITATION (4)
-                # finish_reason 1 = STOP (normal completion) - this is GOOD!
-                # finish_reason 2 = MAX_TOKENS (truncated but not blocked) - also OK
-                if finish_int == 3 or 'SAFETY' in finish_str:
-                    print("Warning: Optimizer response blocked by safety filters, using original prompt")
-                    u_new = u_prompt
-                elif finish_int == 4 or 'RECITATION' in finish_str:
-                    print("Warning: Optimizer response blocked due to recitation, using original prompt")
-                    u_new = u_prompt
-                else:
-                    # Try to get text - finish_reason 1 or 2 are OK
-                    print(f"[DEBUG Optimizer] Finish reason: {finish_reason}, extracting text...")
-                    try:
-                        # Try parts first
-                        if candidate.content and hasattr(candidate.content, 'parts') and candidate.content.parts:
-                            text_parts = [part.text for part in candidate.content.parts if hasattr(part, 'text') and part.text]
-                            if text_parts:
-                                u_new = ' '.join(text_parts).strip()
-                                print(f"[DEBUG Optimizer] Extracted text from parts, length: {len(u_new)}")
-                            else:
-                                print("[DEBUG Optimizer] No text in parts, trying response.text")
-                                if hasattr(response, 'text') and response.text:
-                                    u_new = response.text.strip()
-                                else:
-                                    u_new = u_prompt
-                        elif hasattr(response, 'text') and response.text:
-                            u_new = response.text.strip()
-                            print(f"[DEBUG Optimizer] Extracted text from response.text, length: {len(u_new)}")
-                        else:
-                            print("[DEBUG Optimizer] No text available, using original prompt")
-                            print(f"[DEBUG Optimizer] Full candidate: {candidate}")
-                            u_new = u_prompt
-                    except (AttributeError, IndexError) as e:
-                        print(f"[DEBUG Optimizer] Error extracting text: {e}")
-                        print(f"[DEBUG Optimizer] Full candidate: {candidate}")
-                        print(f"[DEBUG Optimizer] Full response: {response}")
-                        u_new = u_prompt
-            else:
-                # No finish reason, try to get text
-                try:
-                    if hasattr(response, 'text') and response.text:
-                        u_new = response.text.strip()
-                    elif candidate.content and hasattr(candidate.content, 'parts'):
-                        text_parts = [part.text for part in candidate.content.parts if hasattr(part, 'text') and part.text]
-                        u_new = ' '.join(text_parts).strip() if text_parts else u_prompt
-                    else:
-                        u_new = u_prompt
-                except (AttributeError, IndexError):
-                    print("Warning: Could not extract text from optimizer response, using original prompt")
-                    u_new = u_prompt
-    except Exception as e:
-        print(f"Error in optimizer model: {e}")
-        u_new = u_prompt  # Fallback to original prompt
+    u_new = call_optimizer_model(full_prompt, "improve_strategy")  # LLM_CALL (via call_optimizer_model)
     
     # Extract strategy prompt if it's in the expected format
     if "STRATEGY-PROMPT:" in u_new:
@@ -733,28 +500,28 @@ def improve(
         if not u_new.startswith("STRATEGY-PROMPT:"):
             u_new = f"STRATEGY-PROMPT: {u_new}"
     else:
-        # If not in expected format, prepend the label
         u_new = f"STRATEGY-PROMPT: {u_new}"
     
-    avg_payout = sum([t[3] for t in transcript]) / len(transcript) if transcript else 0.0
-    
-    return u_new, transcript, avg_payout
+    return u_new
 
+# ============================================================================
+# GAME CLASS
+# ============================================================================
 
 class LLMCompetition(Game):
     """
     LLM Competition Game: Two LLMs compete to have their answers chosen by a user.
     
-    Agents are represented by strategy prompts (strings) that guide how they
-    respond to questions. The game evaluates which agent produces answers that
-    better match the user's hidden preferences.
+    Supports both simulated and interactive user evaluation.
+    Uses answer caching to minimize LLM API calls.
     """
     
     def __init__(
         self,
         user_prefs: Optional[UserPreferences] = None,
         questions: Optional[List[str]] = None,
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
+        evaluator: Optional[UserEvaluator] = None
     ):
         """
         Initialize the LLM Competition game.
@@ -763,9 +530,15 @@ class LLMCompetition(Game):
             user_prefs: User preferences. If None, generates random preferences.
             questions: List of questions to use for evaluation. If None, uses DEFAULT_QUESTIONS.
             seed: Random seed for generating preferences if user_prefs is None.
+            evaluator: UserEvaluator instance. If None, creates SimulatedUserEvaluator.
         """
         self.user_prefs = user_prefs if user_prefs is not None else UserPreferences.random(seed)
         self.questions = questions if questions is not None else DEFAULT_QUESTIONS
+        
+        if evaluator is None:
+            self.evaluator = SimulatedUserEvaluator(self.user_prefs)
+        else:
+            self.evaluator = evaluator
     
     def play(self, u: str, v: str) -> float:
         """
@@ -779,13 +552,12 @@ class LLMCompetition(Game):
             Payoff for agent A (1.0 = wins, -1.0 = loses, 0.0 = tie)
         """
         question = random.choice(self.questions)
-        _, _, payout = evaluate(u, v, question, self.user_prefs, COMPETITION_GAME_PROMPT)
+        _, _, payout = evaluate_pair(u, v, question, self.evaluator, COMPETITION_GAME_PROMPT)
         return float(payout)
     
     def improve(self, u: str, v: str, *, n_games: int = 10) -> str:
         """
         Improve agent u's strategy against agent v.
-        Follows the pattern from llm2.py.
         
         Args:
             u: Strategy prompt for agent A (to improve)
@@ -795,10 +567,13 @@ class LLMCompetition(Game):
         Returns:
             Improved strategy prompt for agent A
         """
-        print("U:", u, "\t, V:", v)
-        u_new, _, _ = improve(u, v, n_games, self.user_prefs, self.questions, COMPETITION_GAME_PROMPT)
-        print("U_NEW:", u_new)
-        return u_new
+        transcript = []
+        for _ in range(n_games):
+            question = random.choice(self.questions)
+            answer_a, answer_b, payout = evaluate_pair(u, v, question, self.evaluator, COMPETITION_GAME_PROMPT)
+            transcript.append((question, answer_a, answer_b, payout))
+        
+        return improve_strategy(u, v, transcript, COMPETITION_GAME_PROMPT)
     
     def get_default_strategies(self) -> Tuple[str, str]:
         """
@@ -810,165 +585,696 @@ class LLMCompetition(Game):
         strategy_a = generate_strategy_from_preferences(self.user_prefs)
         
         # Create a complementary strategy for player B
-        # Invert some preferences to create contrast
         inverted_prefs = UserPreferences(
             sociability=1.0 - self.user_prefs.sociability,
             knowledge_depth=1.0 - self.user_prefs.knowledge_depth,
             conciseness=1.0 - self.user_prefs.conciseness,
             formality=1.0 - self.user_prefs.formality,
             creativity=1.0 - self.user_prefs.creativity,
-            accuracy=self.user_prefs.accuracy,  # Keep accuracy similar
+            accuracy=self.user_prefs.accuracy,
             empathy=1.0 - self.user_prefs.empathy,
         )
         strategy_b = generate_strategy_from_preferences(inverted_prefs)
         
         return strategy_a, strategy_b
 
+# ============================================================================
+# EMPIRICAL GAMESCAPE COMPUTATION
+# ============================================================================
 
-# ---- Main ----
-
-if __name__ == "__main__":
-    print("=" * 80)
-    print("LLM COMPETITION GAME - 3 ROUNDS")
-    print("=" * 80)
-    print()
+def compute_empirical_gamescape(
+    population: List[str],
+    game: 'LLMCompetition',
+    evaluator: Optional[UserEvaluator] = None,
+    n_questions_per_pair: int = 5,
+    use_cache: bool = True,
+    progress_callback: Optional[Callable[[str, float], None]] = None
+) -> np.ndarray:
+    """
+    Compute the empirical gamescape (EGS) matrix for a population of agents.
     
-    # Initialize game
-    game = LLMCompetition(seed=42)
+    The EGS matrix is an n×n antisymmetric matrix where entry [i, j] represents
+    the average payoff agent i receives when playing against agent j.
     
-    # Display user preferences
-    print("📊 USER PREFERENCES (Hidden)")
-    print("-" * 80)
-    print(f"  Sociability:      {game.user_prefs.sociability:.2f}")
-    print(f"  Knowledge Depth:  {game.user_prefs.knowledge_depth:.2f}")
-    print(f"  Conciseness:      {game.user_prefs.conciseness:.2f}")
-    print(f"  Formality:        {game.user_prefs.formality:.2f}")
-    print(f"  Creativity:       {game.user_prefs.creativity:.2f}")
-    print(f"  Accuracy:         {game.user_prefs.accuracy:.2f}")
-    print(f"  Empathy:          {game.user_prefs.empathy:.2f}")
-    print()
+    Optimization: Uses answer caching to minimize LLM calls. For each agent-question
+    pair, the answer is generated once and cached, then reused for all comparisons.
+    This reduces LLM calls from 2*n_questions_per_pair per pair to n_agents total calls.
     
-    # Get initial strategies
-    p1, p2 = game.get_default_strategies()
+    Args:
+        population: List of agent strategy prompts
+        game: LLMCompetition game instance
+        evaluator: UserEvaluator instance. If None, uses game's default evaluator.
+        n_questions_per_pair: Number of questions to evaluate per agent pair.
+                            If >= len(game.questions), uses all questions.
+        use_cache: Whether to use answer caching
+        progress_callback: Optional callback function(progress_message, progress_ratio)
+                         for reporting progress (useful for UI)
     
-    print("🎯 INITIAL STRATEGIES")
-    print("-" * 80)
-    print(f"\nPlayer 1 Strategy:\n{p1}")
-    print(f"\nPlayer 2 Strategy:\n{p2}")
-    print()
+    Returns:
+        n×n numpy array representing the EGS matrix. Entry [i, j] is the average
+        payoff agent i receives against agent j. The matrix is antisymmetric:
+        egs_matrix[i, j] = -egs_matrix[j, i]
     
-    # Store all game data
-    all_rounds_data = []
+    Example:
+        >>> game = LLMCompetition()
+        >>> population = [game.get_default_strategies()[0], game.get_default_strategies()[1]]
+        >>> egs = compute_empirical_gamescape(population, game, n_questions_per_pair=3)
+        >>> # egs[i, j] = average payoff of agent i vs agent j
+    """
+    import random
     
-    # Run 3 rounds of improvement
-    for round_num in range(1, 2):
-        print("=" * 80)
-        print(f"🔄 ROUND {round_num}")
-        print("=" * 80)
-        print()
-        
-        # Determine which player to improve (alternate)
-        if round_num % 2 == 1:
-            # Round 1, 3: Improve Player 1
-            improving_player = 1
-            u, v = p1, p2
-            u_name, v_name = "Player 1", "Player 2"
-        else:
-            # Round 2: Improve Player 2
-            improving_player = 2
-            u, v = p2, p1
-            u_name, v_name = "Player 2", "Player 1"
-        
-        print(f"Improving: {u_name} (against {v_name})")
-        print(f"\n{u_name} Current Strategy:\n{u}")
-        print(f"\n{v_name} Strategy:\n{v}")
-        print()
-        
-        # Run improvement
-        print(f"Playing games and collecting data...")
-        u_new, transcript, avg_payout = improve(
-            u, v, 
-            n_games=3,  # 3 games per round for faster execution
-            user_prefs=game.user_prefs, 
-            questions=game.questions
-        )
-        
-        # Display transcript for this round
-        print()
-        print(f"📝 ROUND {round_num} TRANSCRIPT")
-        print("-" * 80)
-        for i, (question, answer_a, answer_b, payout) in enumerate(transcript, 1):
-            winner = "A" if payout > 0 else "B" if payout < 0 else "TIE"
-            if improving_player == 1:
-                # Player 1 is improving, so A is Player 1
-                winner_name = u_name if winner == "A" else v_name if winner == "B" else "TIE"
-            else:
-                # Player 2 is improving, so A is Player 2
-                winner_name = u_name if winner == "A" else v_name if winner == "B" else "TIE"
+    n = len(population)
+    egs_matrix = np.zeros((n, n))
+    
+    if evaluator is None:
+        evaluator = game.evaluator
+    
+    questions = game.questions
+    game_prompt = COMPETITION_GAME_PROMPT
+    
+    # Determine which questions to use for each pair
+    if n_questions_per_pair >= len(questions):
+        eval_questions = questions
+    else:
+        eval_questions = random.sample(questions, min(n_questions_per_pair, len(questions)))
+    
+    # Step 1: Pre-generate answers for all agents on all questions (with caching)
+    if progress_callback:
+        progress_callback("Generating answers for all agents...", 0.0)
+    
+    # Use generate_answers_batch which handles caching automatically
+    answer_dict = generate_answers_batch(
+        strategies=population,
+        questions=eval_questions,
+        game_prompt=game_prompt,
+        call_site_prefix="egs_generate",
+        use_cache=use_cache
+    )
+    
+    if progress_callback:
+        progress_callback("Computing payoffs from cached answers...", 0.5)
+    
+    # Step 2: Compute payoffs for each pair using cached answers
+    total_pairs = n * (n - 1) // 2
+    current_pair = 0
+    
+    for i in range(n):
+        for j in range(i + 1, n):
+            payoffs = []
             
-            print(f"\nGame {i}:")
-            print(f"  Question: {question}")
-            print(f"  {u_name} Answer: {answer_a[:200]}{'...' if len(answer_a) > 200 else ''}")
-            print(f"  {v_name} Answer: {answer_b[:200]}{'...' if len(answer_b) > 200 else ''}")
-            print(f"  Winner: {winner_name} (Payout: {payout:+d})")
+            for question_idx, question in enumerate(eval_questions):
+                # Get cached answers
+                answer_a = answer_dict.get((i, question_idx))
+                answer_b = answer_dict.get((j, question_idx))
+                
+                # Fallback: generate if not in batch results (shouldn't happen)
+                if answer_a is None:
+                    answer_a = generate_answer(
+                        population[i], question, game_prompt,
+                        f"egs_fallback_agent_{i}", use_cache
+                    )
+                if answer_b is None:
+                    answer_b = generate_answer(
+                        population[j], question, game_prompt,
+                        f"egs_fallback_agent_{j}", use_cache
+                    )
+                
+                # Evaluate using provided evaluator
+                winner = evaluator.evaluate(answer_a, answer_b, question, i, j)
+                payout = calculate_payout(winner)
+                payoffs.append(payout)
+            
+            # Average payoffs across questions
+            avg_payoff = np.mean(payoffs)
+            egs_matrix[i, j] = avg_payoff
+            egs_matrix[j, i] = -avg_payoff  # Antisymmetric
+            
+            current_pair += 1
+            if progress_callback:
+                progress_ratio = 0.5 + 0.5 * (current_pair / total_pairs)
+                progress_callback(f"Computing payoffs... ({current_pair}/{total_pairs} pairs)", progress_ratio)
+    
+    return egs_matrix
+
+
+def compute_empirical_gamescape_interactive(
+    population: List[str],
+    game: 'LLMCompetition',
+    questions: Optional[List[str]] = None,
+    n_questions_per_pair: int = 3,
+    use_cache: bool = True
+) -> Tuple[Dict[Tuple[int, int, int], Tuple[str, str, str]], List[Tuple[int, int, int]]]:
+    """
+    Prepare data for interactive EGS computation where user provides feedback.
+    
+    This function pre-generates all answers (with caching) and returns:
+    1. A dictionary of (agent_i, agent_j, question_idx) -> (question, answer_i, answer_j)
+    2. A shuffled list of all comparisons to present to the user
+    
+    Args:
+        population: List of agent strategy prompts
+        game: LLMCompetition game instance
+        questions: Questions to use. If None, uses game.questions
+        n_questions_per_pair: Number of questions per agent pair
+        use_cache: Whether to use answer caching
+    
+    Returns:
+        (comparisons_dict, comparison_order) where:
+        - comparisons_dict: {(i, j, q_idx): (question, answer_i, answer_j)}
+        - comparison_order: List of (i, j, q_idx) tuples in shuffled order
+    """
+    import random
+    
+    if questions is None:
+        questions = game.questions
+    
+    n = len(population)
+    game_prompt = COMPETITION_GAME_PROMPT
+    
+    # Determine which questions to use for each pair
+    eval_questions_per_pair = min(n_questions_per_pair, len(questions))
+    
+    # Generate all answers with caching
+    all_questions = list(set(questions))  # Use all unique questions
+    answer_dict = generate_answers_batch(
+        strategies=population,
+        questions=all_questions,
+        game_prompt=game_prompt,
+        call_site_prefix="egs_interactive",
+        use_cache=use_cache
+    )
+    
+    # Build comparison list
+    comparisons_dict = {}
+    comparison_order = []
+    
+    for i in range(n):
+        for j in range(i + 1, n):
+            # Sample questions for this pair
+            pair_questions = random.sample(all_questions, min(eval_questions_per_pair, len(all_questions)))
+            
+            for question in pair_questions:
+                q_idx = all_questions.index(question)
+                answer_i = answer_dict.get((i, q_idx))
+                answer_j = answer_dict.get((j, q_idx))
+                
+                # Fallback if needed
+                if answer_i is None:
+                    answer_i = generate_answer(population[i], question, game_prompt, f"egs_interactive_fallback_{i}", use_cache)
+                if answer_j is None:
+                    answer_j = generate_answer(population[j], question, game_prompt, f"egs_interactive_fallback_{j}", use_cache)
+                
+                comparisons_dict[(i, j, q_idx)] = (question, answer_i, answer_j)
+                comparison_order.append((i, j, q_idx))
+    
+    # Shuffle order
+    random.shuffle(comparison_order)
+    
+    return comparisons_dict, comparison_order
+
+
+def build_egs_matrix_from_interactive_results(
+    comparisons_dict: Dict[Tuple[int, int, int], Tuple[str, str, str]],
+    user_choices: Dict[Tuple[int, int, int], str],
+    n_agents: int
+) -> np.ndarray:
+    """
+    Build EGS matrix from interactive user feedback.
+    
+    Args:
+        comparisons_dict: {(i, j, q_idx): (question, answer_i, answer_j)}
+        user_choices: {(i, j, q_idx): "A"|"B"|"TIE"}
+        n_agents: Number of agents in population
+    
+    Returns:
+        n×n EGS matrix
+    """
+    egs_matrix = np.zeros((n_agents, n_agents))
+    payoffs_dict = {}  # {(i, j): [payoffs]}
+    
+    # Collect payoffs
+    for (i, j, q_idx), user_choice in user_choices.items():
+        payout = calculate_payout(user_choice)
+        if (i, j) not in payoffs_dict:
+            payoffs_dict[(i, j)] = []
+        payoffs_dict[(i, j)].append(payout)
+    
+    # Average payoffs per pair
+    for (i, j), payoffs in payoffs_dict.items():
+        avg_payoff = np.mean(payoffs)
+        egs_matrix[i, j] = avg_payoff
+        egs_matrix[j, i] = -avg_payoff  # Antisymmetric
+    
+    return egs_matrix
+
+# ============================================================================
+# EXPERIMENT UTILITIES
+# ============================================================================
+
+def save_experiment_results(
+    population: List[str],
+    egs_matrix: np.ndarray,
+    game: LLMCompetition,
+    experiment_params: Dict[str, any],
+    save_dir: str = "out/llm_competition",
+    prefix: str = "llm_competition"
+) -> str:
+    """
+    Save experiment results including population, gamescape, and metadata.
+    Results are organized into subfolders based on experiment parameters.
+    
+    Args:
+        population: List of agent strategy prompts
+        egs_matrix: Empirical gamescape matrix
+        game: LLMCompetition game instance
+        experiment_params: Dictionary of experiment parameters (must include 'user_mode': 'simulated' or 'interactive')
+        save_dir: Base directory to save results
+        prefix: Prefix for saved files
+    
+    Returns:
+        Base name of saved files (relative to subfolder)
+    """
+    import json
+    import pickle
+    import os
+    from datetime import datetime
+    
+    # Create subfolder based on experiment parameters
+    n_agents = experiment_params.get("n_agents", "unknown")
+    improvement_method = experiment_params.get("improvement_method", "unknown")
+    user_mode = experiment_params.get("user_mode", "unknown")  # 'simulated' or 'interactive'
+    n_questions = experiment_params.get("n_questions_per_pair", "unknown")
+    
+    # Create descriptive subfolder name
+    subfolder = f"agents_{n_agents}_method_{improvement_method}_mode_{user_mode}_questions_{n_questions}"
+    experiment_dir = os.path.join(save_dir, subfolder)
+    os.makedirs(experiment_dir, exist_ok=True)
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_name = f"{prefix}_{timestamp}"
+    
+    # Save population
+    population_file = os.path.join(experiment_dir, f"{base_name}_population.pkl")
+    with open(population_file, 'wb') as f:
+        pickle.dump(population, f)
+    
+    # Save gamescape matrix
+    matrix_file = os.path.join(experiment_dir, f"{base_name}_egs_matrix.npy")
+    np.save(matrix_file, egs_matrix)
+    
+    # Save user preferences
+    prefs_file = os.path.join(experiment_dir, f"{base_name}_user_prefs.json")
+    prefs_dict = {
+        "sociability": game.user_prefs.sociability,
+        "knowledge_depth": game.user_prefs.knowledge_depth,
+        "conciseness": game.user_prefs.conciseness,
+        "formality": game.user_prefs.formality,
+        "creativity": game.user_prefs.creativity,
+        "accuracy": game.user_prefs.accuracy,
+        "empathy": game.user_prefs.empathy,
+    }
+    with open(prefs_file, 'w') as f:
+        json.dump(prefs_dict, f, indent=2)
+    
+    # Save metadata
+    metadata = {
+        "timestamp": timestamp,
+        "experiment_params": experiment_params,
+        "n_agents": len(population),
+        "user_preferences": prefs_dict,
+        "user_mode": user_mode,  # Track simulated vs interactive
+        "subfolder": subfolder,  # Track which subfolder this was saved in
+        "gamescape_stats": {
+            "min": float(egs_matrix.min()),
+            "max": float(egs_matrix.max()),
+            "mean": float(egs_matrix.mean()),
+            "std": float(egs_matrix.std()),
+        },
+        "files": {
+            "population": population_file,
+            "matrix": matrix_file,
+            "preferences": prefs_file,
+        }
+    }
+    metadata_file = os.path.join(experiment_dir, f"{base_name}_metadata.json")
+    with open(metadata_file, 'w') as f:
+        json.dump(metadata, f, indent=2)
+    
+    # Create comprehensive experiment info text file
+    info_file = os.path.join(experiment_dir, f"{base_name}_experiment_info.txt")
+    with open(info_file, 'w') as f:
+        f.write("=" * 80 + "\n")
+        f.write("LLM Competition Experiment Information\n")
+        f.write("=" * 80 + "\n\n")
         
-        print()
-        print(f"📈 ROUND {round_num} STATISTICS")
-        print("-" * 80)
-        print(f"  Average Payoff ({u_name}): {avg_payout:+.3f}")
-        wins = sum(1 for _, _, _, p in transcript if (p > 0 and improving_player == 1) or (p < 0 and improving_player == 2))
-        losses = sum(1 for _, _, _, p in transcript if (p < 0 and improving_player == 1) or (p > 0 and improving_player == 2))
-        ties = sum(1 for _, _, _, p in transcript if p == 0)
-        print(f"  Wins: {wins}, Losses: {losses}, Ties: {ties}")
+        f.write(f"Experiment ID: {base_name}\n")
+        f.write(f"Timestamp: {timestamp}\n")
+        f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
         
-        print()
-        print(f"✨ {u_name} IMPROVED STRATEGY")
-        print("-" * 80)
-        print(f"{u_new}")
-        print()
+        f.write("-" * 80 + "\n")
+        f.write("EXPERIMENT PARAMETERS\n")
+        f.write("-" * 80 + "\n\n")
         
-        # Update the strategy
-        if improving_player == 1:
-            p1 = u_new
+        f.write(f"Number of Agents: {len(population)}\n")
+        f.write(f"Improvement Method: {experiment_params.get('improvement_method', 'N/A')}\n")
+        f.write(f"Games per Agent (for improvement): {experiment_params.get('n_games_per_agent', 'N/A')}\n")
+        f.write(f"Questions per Agent Pair (for EGS matrix): {experiment_params.get('n_questions_per_pair', 'N/A')}\n")
+        f.write(f"User Mode: {user_mode.upper()}\n")
+        f.write(f"  - Simulated: Uses automated user preference simulation\n")
+        f.write(f"  - Interactive: Requires human feedback for each comparison\n\n")
+        
+        f.write("-" * 80 + "\n")
+        f.write("TRAINING STATISTICS\n")
+        f.write("-" * 80 + "\n\n")
+        
+        f.write(f"Total Training History Entries: {experiment_params.get('training_history_length', 'N/A')}\n")
+        f.write(f"Total Games Played: {experiment_params.get('total_games_played', 'N/A')}\n\n")
+        
+        f.write("-" * 80 + "\n")
+        f.write("EGS MATRIX STATISTICS\n")
+        f.write("-" * 80 + "\n\n")
+        
+        f.write(f"Matrix Shape: {egs_matrix.shape[0]} × {egs_matrix.shape[1]}\n")
+        f.write(f"Min Payoff: {metadata['gamescape_stats']['min']:.4f}\n")
+        f.write(f"Max Payoff: {metadata['gamescape_stats']['max']:.4f}\n")
+        f.write(f"Mean Payoff: {metadata['gamescape_stats']['mean']:.4f}\n")
+        f.write(f"Std Dev Payoff: {metadata['gamescape_stats']['std']:.4f}\n\n")
+        
+        f.write("-" * 80 + "\n")
+        f.write("USER PREFERENCES\n")
+        f.write("-" * 80 + "\n\n")
+        
+        for key, value in prefs_dict.items():
+            f.write(f"{key.replace('_', ' ').title()}: {value:.4f}\n")
+        f.write("\n")
+        
+        f.write("-" * 80 + "\n")
+        f.write("FILE LOCATIONS\n")
+        f.write("-" * 80 + "\n\n")
+        
+        f.write(f"Experiment Directory: {experiment_dir}\n")
+        f.write(f"Subfolder: {subfolder}\n\n")
+        
+        f.write("Files:\n")
+        f.write(f"  - Population: {os.path.basename(population_file)}\n")
+        f.write(f"  - EGS Matrix: {os.path.basename(matrix_file)}\n")
+        f.write(f"  - User Preferences: {os.path.basename(prefs_file)}\n")
+        f.write(f"  - Metadata: {os.path.basename(metadata_file)}\n")
+        f.write(f"  - Experiment Info: {os.path.basename(info_file)}\n")
+        f.write(f"  - Visualizations: {base_name}_egs_*.png\n\n")
+        
+        f.write("-" * 80 + "\n")
+        f.write("ADDITIONAL NOTES\n")
+        f.write("-" * 80 + "\n\n")
+        
+        # Leave space for user to add notes
+        f.write("[Add any additional notes about this experiment here]\n")
+        f.write("\n")
+        f.write("=" * 80 + "\n")
+    
+    # Return path relative to base save_dir for compatibility
+    return os.path.join(subfolder, base_name)
+
+
+def load_experiment_results(
+    base_name: str,
+    save_dir: str = "out/llm_competition"
+) -> Dict[str, any]:
+    """
+    Load experiment results from saved files.
+    base_name can be either:
+    - Just the filename (e.g., "llm_competition_20240101_120000") - will search subfolders
+    - Full path including subfolder (e.g., "agents_10_method_weaker_mode_simulated/llm_competition_20240101_120000")
+    
+    Args:
+        base_name: Base name of the experiment (can include subfolder path)
+        save_dir: Base directory where results are saved
+    
+    Returns:
+        Dictionary containing:
+        - "population": List of agent strategy prompts
+        - "egs_matrix": Empirical gamescape matrix
+        - "user_prefs": UserPreferences object
+        - "metadata": Dictionary of experiment metadata (includes user_mode, subfolder, etc.)
+        - "loaded_successfully": Boolean indicating if all files were found
+        - "experiment_dir": Directory where experiment files are located
+        - "base_name_only": Just the filename without subfolder
+    
+    Raises:
+        FileNotFoundError: If required files are missing
+    """
+    import json
+    import pickle
+    import os
+    
+    # Handle both formats: with subfolder or without
+    if "/" in base_name or "\\" in base_name:
+        # Full path provided
+        full_path = os.path.join(save_dir, base_name)
+        experiment_dir = os.path.dirname(full_path)
+        base_name_only = os.path.basename(base_name)
+    else:
+        # Just base name - search in subfolders
+        base_name_only = base_name
+        experiment_dir = None
+        # Search for metadata file in subfolders
+        for root, dirs, files in os.walk(save_dir):
+            metadata_file_candidate = os.path.join(root, f"{base_name_only}_metadata.json")
+            if os.path.exists(metadata_file_candidate):
+                experiment_dir = root
+                break
+        
+        if experiment_dir is None:
+            # Fallback: try root directory
+            experiment_dir = save_dir
+    
+    population_file = os.path.join(experiment_dir, f"{base_name_only}_population.pkl")
+    matrix_file = os.path.join(experiment_dir, f"{base_name_only}_egs_matrix.npy")
+    prefs_file = os.path.join(experiment_dir, f"{base_name_only}_user_prefs.json")
+    metadata_file = os.path.join(experiment_dir, f"{base_name_only}_metadata.json")
+    
+    result = {
+        "loaded_successfully": False,
+        "population": None,
+        "egs_matrix": None,
+        "user_prefs": None,
+        "metadata": None,
+        "missing_files": [],
+        "visualization_files": []  # List of paths to saved visualization files
+    }
+    
+    # Check which files exist
+    if not os.path.exists(population_file):
+        result["missing_files"].append("population")
+    if not os.path.exists(matrix_file):
+        result["missing_files"].append("egs_matrix")
+    if not os.path.exists(prefs_file):
+        result["missing_files"].append("user_prefs")
+    if not os.path.exists(metadata_file):
+        result["missing_files"].append("metadata")
+    
+    if result["missing_files"]:
+        return result
+    
+    # Load all files
+    try:
+        with open(population_file, 'rb') as f:
+            result["population"] = pickle.load(f)
+        
+        result["egs_matrix"] = np.load(matrix_file)
+        
+        with open(prefs_file, 'r') as f:
+            prefs_dict = json.load(f)
+        result["user_prefs"] = UserPreferences.from_dict(prefs_dict)
+        
+        with open(metadata_file, 'r') as f:
+            result["metadata"] = json.load(f)
+        
+        result["loaded_successfully"] = True
+        
+        # Check for saved visualization files (in the same experiment directory)
+        embedding_methods = ["schur", "PCA", "SVD", "tSNE"]
+        for method in embedding_methods:
+            viz_file = os.path.join(experiment_dir, f"{base_name_only}_egs_{method}.png")
+            if os.path.exists(viz_file):
+                result["visualization_files"].append({
+                    "method": method,
+                    "path": viz_file
+                })
+        
+        # Store the experiment directory and base name for reference
+        result["experiment_dir"] = experiment_dir
+        result["base_name_only"] = base_name_only
+        
+        # Load experiment info text file if it exists (try even if other loading failed)
+        info_file = os.path.join(experiment_dir, f"{base_name_only}_experiment_info.txt")
+        if os.path.exists(info_file):
+            try:
+                with open(info_file, 'r') as f:
+                    result["experiment_info"] = f.read()
+            except Exception as e:
+                result["experiment_info"] = None
+                result["experiment_info_error"] = str(e)
         else:
-            p2 = u_new
-        
-        # Store round data
-        all_rounds_data.append({
-            "round": round_num,
-            "improving_player": improving_player,
-            "u_strategy_before": u,
-            "v_strategy": v,
-            "u_strategy_after": u_new,
-            "transcript": transcript,
-            "avg_payout": avg_payout,
-        })
+            result["experiment_info"] = None
+    except Exception as e:
+        result["error"] = str(e)
+        # Still try to load info file even if other loading failed
+        if "experiment_dir" in result and "base_name_only" in result:
+            info_file = os.path.join(result["experiment_dir"], f"{result['base_name_only']}_experiment_info.txt")
+            if os.path.exists(info_file):
+                try:
+                    with open(info_file, 'r') as f:
+                        result["experiment_info"] = f.read()
+                except:
+                    pass
+        return result
     
-    # Final summary
-    print("=" * 80)
-    print("🏁 FINAL SUMMARY")
-    print("=" * 80)
-    print()
+    return result
+
+
+def list_saved_experiments(save_dir: str = "out/llm_competition") -> List[Dict[str, str]]:
+    """
+    List all saved experiments in the output directory and subfolders.
     
-    print("Final Player 1 Strategy:")
-    print("-" * 80)
-    print(p1)
-    print()
+    Args:
+        save_dir: Base directory to search for experiments (searches recursively in subfolders)
     
-    print("Final Player 2 Strategy:")
-    print("-" * 80)
-    print(p2)
-    print()
+    Returns:
+        List of dictionaries with experiment info:
+        - "base_name": Full path including subfolder (for loading)
+        - "base_name_only": Just the filename
+        - "timestamp": Timestamp from filename
+        - "subfolder": Subfolder name (experiment parameters)
+        - "metadata_file": Path to metadata file
+        - "has_population": Whether population file exists
+        - "has_matrix": Whether EGS matrix exists
+        - "has_prefs": Whether preferences file exists
+        - "user_mode": 'simulated' or 'interactive' (from metadata if available)
+    """
+    import os
+    import re
+    import json
+    from pathlib import Path
     
-    print("📊 ROUND-BY-ROUND SUMMARY")
-    print("-" * 80)
-    for round_data in all_rounds_data:
-        player_name = f"Player {round_data['improving_player']}"
-        print(f"\nRound {round_data['round']} ({player_name} improved):")
-        print(f"  Average Payoff: {round_data['avg_payout']:+.3f}")
-        print(f"  Games Played: {len(round_data['transcript'])}")
+    experiments = []
     
-    print()
-    print("=" * 80)
-    print("Game Complete!")
-    print("=" * 80)
+    if not os.path.exists(save_dir):
+        return experiments
+    
+    # Find all metadata files recursively in subfolders
+    pattern = re.compile(r"^(llm_competition_\d{8}_\d{6})_metadata\.json$")
+    
+    for root, dirs, files in os.walk(save_dir):
+        for file in files:
+            match = pattern.match(file)
+            if match:
+                base_name_only = match.group(1)
+                metadata_file = os.path.join(root, file)
+                
+                # Get subfolder name (relative to save_dir)
+                rel_path = os.path.relpath(root, save_dir)
+                subfolder = rel_path if rel_path != "." else "root"
+                
+                # Full base name including subfolder for loading
+                if subfolder == "root":
+                    base_name = base_name_only
+                else:
+                    base_name = os.path.join(subfolder, base_name_only).replace("\\", "/")
+                
+                # Check which files exist
+                population_file = os.path.join(root, f"{base_name_only}_population.pkl")
+                matrix_file = os.path.join(root, f"{base_name_only}_egs_matrix.npy")
+                prefs_file = os.path.join(root, f"{base_name_only}_user_prefs.json")
+                
+                # Extract timestamp
+                timestamp_match = re.search(r"(\d{8}_\d{6})", base_name_only)
+                timestamp = timestamp_match.group(1) if timestamp_match else "unknown"
+                
+                # Try to load metadata to get user_mode and other info
+                user_mode = "unknown"
+                n_agents = "unknown"
+                improvement_method = "unknown"
+                n_questions = "unknown"
+                try:
+                    with open(metadata_file, 'r') as f:
+                        metadata = json.load(f)
+                        user_mode = metadata.get("user_mode", "unknown")
+                        n_agents = metadata.get("n_agents", metadata.get("experiment_params", {}).get("n_agents", "unknown"))
+                        improvement_method = metadata.get("experiment_params", {}).get("improvement_method", "unknown")
+                        n_questions = metadata.get("experiment_params", {}).get("n_questions_per_pair", "unknown")
+                except:
+                    pass
+                
+                experiments.append({
+                    "base_name": base_name,  # Full path for loading
+                    "base_name_only": base_name_only,  # Just filename
+                    "timestamp": timestamp,
+                    "subfolder": subfolder,
+                    "metadata_file": metadata_file,
+                    "has_population": os.path.exists(population_file),
+                    "has_matrix": os.path.exists(matrix_file),
+                    "has_prefs": os.path.exists(prefs_file),
+                    "user_mode": user_mode,
+                    "n_agents": n_agents,
+                    "improvement_method": improvement_method,
+                    "n_questions_per_pair": n_questions,
+                })
+    
+    # Sort by timestamp (newest first)
+    experiments.sort(key=lambda x: x["timestamp"], reverse=True)
+    
+    return experiments
+
+
+def visualize_gamescape(
+    egs_matrix: np.ndarray,
+    save_dir: str = "out/llm_competition",
+    prefix: str = "llm_competition"
+) -> None:
+    """
+    Visualize the empirical gamescape using different embedding methods.
+    
+    Note: prefix can include subfolder path (e.g., "agents_10_method_weaker/llm_competition_20240101_120000")
+    """
+    """
+    Visualize the empirical gamescape using different embedding methods.
+    
+    Args:
+        egs_matrix: Empirical gamescape matrix
+        save_dir: Directory to save visualizations
+        prefix: Prefix for saved files
+    """
+    import os
+    from games.egs import EmpiricalGS, visualize_egs_matrix_and_embeddings
+    
+    # Handle prefix that might include subfolder
+    if "/" in prefix or "\\" in prefix:
+        # Full path provided
+        full_path = os.path.join(save_dir, prefix)
+        experiment_dir = os.path.dirname(full_path)
+        base_name_only = os.path.basename(prefix)
+    else:
+        # Just base name - save in root
+        experiment_dir = save_dir
+        base_name_only = prefix
+    
+    os.makedirs(experiment_dir, exist_ok=True)
+    egs = EmpiricalGS(egs_matrix)
+    
+    embedding_methods = {
+        "schur": egs.schur_embeddings,
+        "PCA": egs.PCA_embeddings,
+        "SVD": egs.SVD_embeddings,
+    }
+    
+    if egs_matrix.shape[0] <= 50:
+        embedding_methods["tSNE"] = egs.tSNE_embeddings
+    
+    for method_name, embedding_func in embedding_methods.items():
+        try:
+            embeddings = embedding_func()
+            save_path = os.path.join(experiment_dir, f"{base_name_only}_egs_{method_name}.png")
+            visualize_egs_matrix_and_embeddings(egs, embeddings, save_path=save_path)
+        except Exception as e:
+            print(f"⚠️  {method_name} visualization failed: {e}")

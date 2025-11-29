@@ -21,7 +21,7 @@ from games.blotto.differentiable_lotto import DifferentiableLotto
 from games.blotto.differentiable_lotto_vis import gif_from_matchups
 from games.penneys.penneys import PennysGame, PennysAgent, demo_penneys_game
 from games.penneys.penneys_vis import gif_from_population as penneys_gif_from_population, gif_from_matchups as penneys_gif_from_matchups
-from games.game import run_PSRO_uniform_weaker, run_PSRO_uniform_stronger, run_PSRO_uniform
+from games.game import run_PSRO_uniform_weaker, run_PSRO_uniform_stronger, run_PSRO_uniform, create_population
 
 
 def run_disc_game_demo(
@@ -99,7 +99,8 @@ def run_blotto_game_demo(
     num_iterations: int = 1000,
     n_rounds: int = 1000,
     n_battlefields: int = 3,
-    budget: int = 10
+    budget: int = 10,
+    num_agents: int = 3
 ) -> Dict[str, Any]:
     """
     Run Blotto Game demo with PSRO variants.
@@ -110,6 +111,7 @@ def run_blotto_game_demo(
         n_rounds: Number of rounds per evaluation
         n_battlefields: Number of battlefields
         budget: Total budget
+        num_agents: Number of agents in the population (default: 3)
     
     Returns:
         Dictionary with results
@@ -127,47 +129,55 @@ def run_blotto_game_demo(
     import copy
     
     game = BlottoGame()
-    # Create a population of 3 agents
-    agent_1 = LogitAgent(n_battlefields, budget)
-    agent_2 = LogitAgent(n_battlefields, budget)
-    agent_3 = LogitAgent(n_battlefields, budget)
     
-    # Track win rates for each agent pair
-    values_12 = []
-    values_13 = []
-    values_23 = []
+    # Create population of N agents using create_population helper
+    def agent_factory(**kwargs):
+        return LogitAgent(n_battlefields=kwargs.get('n_battlefields', n_battlefields),
+                         budget=kwargs.get('budget', budget))
+    
+    population = create_population(
+        game=game,
+        num_agents=num_agents,
+        seed=42,
+        agent_factory=agent_factory,
+        n_battlefields=n_battlefields,
+        budget=budget
+    )
+    
+    # Track win rates for all agent pairs
+    # Store as dict: {(i, j): [values over time]}
+    win_rate_history = {}
+    for i in range(num_agents):
+        for j in range(i + 1, num_agents):
+            win_rate_history[(i, j)] = []
     
     # Track agent history for GIF generation
-    agents_history = [[copy.deepcopy(agent_1), copy.deepcopy(agent_2), copy.deepcopy(agent_3)]]
+    agents_history = [[copy.deepcopy(agent) for agent in population]]
     
     for i in range(num_iterations):
-        population = [agent_1, agent_2, agent_3]
-        
         # Improve each agent using the PSRO strategy
-        agent_1 = improvement_func(0, population, game)
-        agent_2 = improvement_func(1, population, game)
-        agent_3 = improvement_func(2, population, game)
+        new_population = []
+        for agent_idx in range(num_agents):
+            new_agent = improvement_func(agent_idx, population, game)
+            new_population.append(new_agent)
+        population = new_population
         
         # Store agent states for GIF
-        agents_history.append([copy.deepcopy(agent_1), copy.deepcopy(agent_2), copy.deepcopy(agent_3)])
+        agents_history.append([copy.deepcopy(agent) for agent in population])
         
-        # Evaluate win rates
-        val_12 = game.play(agent_1, agent_2, n_rounds=n_rounds)
-        val_13 = game.play(agent_1, agent_3, n_rounds=n_rounds)
-        val_23 = game.play(agent_2, agent_3, n_rounds=n_rounds)
-        
-        values_12.append(val_12)
-        values_13.append(val_13)
-        values_23.append(val_23)
+        # Evaluate win rates for all pairs
+        for i_idx in range(num_agents):
+            for j_idx in range(i_idx + 1, num_agents):
+                val = game.play(population[i_idx], population[j_idx], n_rounds=n_rounds)
+                win_rate_history[(i_idx, j_idx)].append(val)
     
-    # Create plot
+    # Create plot with all pairs
     plt.figure(figsize=(12, 6))
-    plt.plot(values_12, label='Agent 1 vs Agent 2', alpha=0.7)
-    plt.plot(values_13, label='Agent 1 vs Agent 3', alpha=0.7)
-    plt.plot(values_23, label='Agent 2 vs Agent 3', alpha=0.7)
+    for (i, j), values in win_rate_history.items():
+        plt.plot(values, label=f'Agent {i+1} vs Agent {j+1}', alpha=0.7)
     plt.xlabel('Iteration')
     plt.ylabel('Win Rate')
-    plt.title(f'Blotto Game: Win Rate Over Time ({improvement_type})')
+    plt.title(f'Blotto Game: Win Rate Over Time ({improvement_type}, {num_agents} agents)')
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -205,19 +215,45 @@ def run_blotto_game_demo(
     except Exception as e:
         print(f"Could not generate GIFs: {e}")
     
+    # Generate gamescape matrix and 2D embeddings visualizations
+    # Generate all EGS visualizations (matrix + PCA, Schur, SVD, t-SNE)
+    egs_visualization_paths = {}
+    try:
+        from games.blotto.blotto_vis import plot_all_egs_visualizations
+        
+        # Generate all EGS visualizations
+        egs_visualization_paths = plot_all_egs_visualizations(
+            game,
+            population,
+            output_dir=f"demos/blotto",
+            base_name=f"{plot_name}_egs",
+            n_rounds=n_rounds,
+            dpi=150
+        )
+        if egs_visualization_paths:
+            print(f"Generated {len(egs_visualization_paths)} EGS visualizations: {list(egs_visualization_paths.keys())}")
+        else:
+            print("Warning: No EGS visualizations were generated")
+    except Exception as e:
+        import traceback
+        print(f"Could not generate EGS visualization plots: {e}")
+        traceback.print_exc()
+    
+    # Build final_values dict for backward compatibility
+    final_values = {}
+    for (i, j), values in win_rate_history.items():
+        if values:
+            final_values[f'agent_{i+1}_vs_{j+1}'] = values[-1]
+    
     return {
         "plot_path": plot_path,
         "gif_path_population": gif_path_pop,
         "gif_path_matchups": gif_path_match,
-        "values_12": values_12,
-        "values_13": values_13,
-        "values_23": values_23,
-        "final_values": {
-            "agent_1_vs_2": values_12[-1] if values_12 else 0.0,
-            "agent_1_vs_3": values_13[-1] if values_13 else 0.0,
-            "agent_2_vs_3": values_23[-1] if values_23 else 0.0
-        },
-        "num_iterations": num_iterations
+        "egs_visualization_paths": egs_visualization_paths,  # Dict of all EGS visualizations
+        "win_rate_history": win_rate_history,
+        "final_values": final_values,
+        "num_iterations": num_iterations,
+        "num_agents": num_agents
     }
 
 

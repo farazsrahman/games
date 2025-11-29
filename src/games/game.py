@@ -218,6 +218,55 @@ def train_population_from_random_agent(initial_population, update_rule, game: Ga
     return population, payoff_matrix
 
 
+
+def create_population(game: Game, num_agents: int, seed: Optional[int] = None, agent_factory=None, **kwargs) -> List:
+    """
+    Create a population of N agents for a game.
+    
+    Args:
+        game: Game instance
+        num_agents: Number of agents to create
+        seed: Optional random seed (if None, uses different seeds for each agent)
+        agent_factory: Optional factory function/class to create agents.
+                      If None, tries game.create_agent() or game.create_random_agent()
+        **kwargs: Additional parameters to pass to agent creation (e.g., n_battlefields, budget)
+    
+    Returns:
+        List of N agents
+    """
+    population = []
+    
+    # Determine agent creation method
+    if agent_factory is not None:
+        create_func = agent_factory
+    elif hasattr(game, 'create_agent'):
+        create_func = game.create_agent
+    elif hasattr(game, 'create_random_agent'):
+        create_func = game.create_random_agent
+    else:
+        raise ValueError(
+            "No agent creation method found. Provide agent_factory parameter or "
+            "implement create_agent() or create_random_agent() in Game class."
+        )
+    
+    # Create agents with different seeds
+    if seed is not None:
+        rng = np.random.RandomState(seed)
+    else:
+        rng = np.random.RandomState()
+    
+    for i in range(num_agents):
+        agent_seed = rng.randint(0, 2**31)
+        # Try to pass seed to agent creation
+        try:
+            agent = create_func(seed=agent_seed, **kwargs)
+        except TypeError:
+            # If seed not supported, just use kwargs
+            agent = create_func(**kwargs)
+        population.append(agent)
+    
+    return population
+
 if __name__ == "__main__":
 
     from games.llms.multiturn_rps import LLMRockPaperScissors as MTRPS_LLMRockPaperScissors
