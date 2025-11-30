@@ -229,6 +229,11 @@ def call_model(user_content: str, call_site: str = "call_model") -> str:
     Returns:
         Model response text
     """
+    from datetime import datetime
+    import time
+    
+    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] call_model ({call_site}): Initializing model {AGENT_MODEL_NAME}...")
+    
     model = genai.GenerativeModel(
         model_name=AGENT_MODEL_NAME,
         generation_config={
@@ -238,11 +243,20 @@ def call_model(user_content: str, call_site: str = "call_model") -> str:
         safety_settings=get_safety_settings()
     )
     
+    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] call_model ({call_site}): Model initialized. Making API call to Gemini...")
+    start_time = time.time()
+    
     try:
         response = model.generate_content(user_content)  # LLM_CALL
-        return extract_response_text(response)
+        elapsed = time.time() - start_time
+        print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] call_model ({call_site}): ✅ API call completed in {elapsed:.2f} seconds")
+        
+        result = extract_response_text(response)
+        print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] call_model ({call_site}): Response extracted ({len(result)} chars)")
+        return result
     except Exception as e:
-        print(f"Error in agent model: {e}")
+        elapsed = time.time() - start_time
+        print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] call_model ({call_site}): ❌ Error after {elapsed:.2f} seconds: {e}")
         import traceback
         traceback.print_exc()
         return f"Error generating response: {str(e)}"
@@ -259,6 +273,11 @@ def call_optimizer_model(user_content: str, call_site: str = "optimizer") -> str
     Returns:
         Optimizer response text
     """
+    from datetime import datetime
+    import time
+    
+    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] call_optimizer_model ({call_site}): Initializing model {OPTIMIZER_MODEL_NAME}...")
+    
     model = genai.GenerativeModel(
         model_name=OPTIMIZER_MODEL_NAME,
         generation_config={
@@ -268,10 +287,19 @@ def call_optimizer_model(user_content: str, call_site: str = "optimizer") -> str
         safety_settings=get_safety_settings()
     )
     
+    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] call_optimizer_model ({call_site}): Model initialized. Making API call to Gemini...")
+    start_time = time.time()
+    
     try:
         response = model.generate_content(user_content)  # LLM_CALL
-        return extract_response_text(response)
+        elapsed = time.time() - start_time
+        print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] call_optimizer_model ({call_site}): ✅ API call completed in {elapsed:.2f} seconds")
+        
+        result = extract_response_text(response)
+        print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] call_optimizer_model ({call_site}): Response extracted ({len(result)} chars)")
+        return result
     except Exception as e:
-        print(f"Error in optimizer model: {e}")
+        elapsed = time.time() - start_time
+        print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] call_optimizer_model ({call_site}): ❌ Error after {elapsed:.2f} seconds: {e}")
         return "[ERROR: Optimizer call failed]"
 

@@ -580,11 +580,16 @@ def improve_strategy(
     Returns:
         Improved strategy prompt for agent A
     """
+    from datetime import datetime
+    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] improve_strategy: Preparing optimizer prompt...")
+    
     transcript_str = str(transcript)
     opt_prompt = get_opt_prompt(u_prompt, v_prompt, transcript_str, game_prompt)
     full_prompt = f"{OPT_SYSTEM_PROMPT}\n\n{opt_prompt}"
     
+    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] improve_strategy: Calling call_optimizer_model (LLM API call starting)...")
     u_new = call_optimizer_model(full_prompt, "improve_strategy")  # LLM_CALL (via call_optimizer_model)
+    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] improve_strategy: ✅ Received response from LLM API")
     
     # Extract strategy prompt if it's in the expected format
     if "STRATEGY-PROMPT:" in u_new:

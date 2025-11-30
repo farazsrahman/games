@@ -21,6 +21,34 @@ from game_runners import (
     run_penneys_game_demo
 )
 
+# Import LLM competition UI helper functions (modularized)
+# Using absolute import to avoid circular dependency issues
+_llm_ui_imported = False
+try:
+    from llm_competition_ui import (
+        initialize_training_state,
+        generate_answers_for_agent,
+        compute_agent_scores,
+        select_opponent_psro,
+        start_next_game,
+        setup_next_preference_comparison,
+        handle_user_choice,
+        compute_egs_from_cache,
+        generate_egs_visualization
+    )
+    _llm_ui_imported = True
+except ImportError:
+    # If import fails, functions will be imported lazily in render_llm_competition_tab
+    initialize_training_state = None
+    generate_answers_for_agent = None
+    compute_agent_scores = None
+    select_opponent_psro = None
+    start_next_game = None
+    setup_next_preference_comparison = None
+    handle_user_choice = None
+    compute_egs_from_cache = None
+    generate_egs_visualization = None
+
 # Page configuration
 st.set_page_config(
     page_title="Open Ended Zero Sum Game Theory Simulations",
@@ -1041,15 +1069,38 @@ def render_llm_competition_tab():
     # Add src to path for imports
     sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
     
+    # UI helper functions are imported at module level (see top of file)
+    # If import failed at module level, try importing here
+    global _llm_ui_imported, initialize_training_state, generate_answers_for_agent
+    global compute_agent_scores, select_opponent_psro, start_next_game
+    global setup_next_preference_comparison, handle_user_choice
+    global compute_egs_from_cache, generate_egs_visualization
+    
+    if not _llm_ui_imported:
+        try:
+            from llm_competition_ui import (
+                initialize_training_state,
+                generate_answers_for_agent,
+                compute_agent_scores,
+                select_opponent_psro,
+                start_next_game,
+                setup_next_preference_comparison,
+                handle_user_choice,
+                compute_egs_from_cache,
+                generate_egs_visualization
+            )
+            _llm_ui_imported = True
+        except ImportError as e:
+            st.error(f"Failed to import LLM competition UI functions: {e}")
+            return
+    
     try:
         from games.llms.llm_competition import (
-            LLMCompetition, UserPreferences, DEFAULT_QUESTIONS,
+            LLMCompetition,
             COMPETITION_GAME_PROMPT,
             get_opt_prompt, OPT_SYSTEM_PROMPT,
             save_experiment_results, visualize_gamescape,
-            compute_empirical_gamescape, compute_empirical_gamescape_interactive,
-            build_egs_matrix_from_interactive_results,
-            load_experiment_results, list_saved_experiments,
+            compute_empirical_gamescape,
             load_experiment_results, list_saved_experiments
         )
         from games.llms.config_llm import call_model
@@ -1100,8 +1151,8 @@ def render_llm_competition_tab():
             "initialized": False,
             "population": [],
             "game": None,
-            "current_agent_idx": 0,
             "current_game_idx": 0,
+            "current_question_idx": 0,
             "current_question": None,
             "current_answer_a": None,
             "current_answer_b": None,
@@ -1109,20 +1160,23 @@ def render_llm_competition_tab():
             "current_agent_b_idx": None,
             "training_history": [],
             "egs_matrix": None,
-            "waiting_for_feedback": False,
             "current_transcript": [],
-            "generating_answers": False,
-            "improving_agent": False,
-            "computing_egs": False,
-            "feedback_given": False,
-            "processing_feedback": False,
-            "user_choice": None,
             "n_agents": 10,
             "n_games_per_agent": 1,
             "improvement_method": "weaker",
             "user_mode": "interactive",
             "llm_user_persona": "You are a 20 year old college student majoring in computer science at UPenn.",
-            "egs_answer_cache": {}  # Cache for EGS computation: {(agent_idx, question): answer}
+            # Simplified state: single phase instead of multiple booleans
+            "phase": "idle",  # "idle", "generating", "waiting_feedback", "processing", "improving", "complete"
+            # Caches
+            "answer_cache": {},  # {(agent_idx, question): answer}
+            "preference_cache": {},  # {(agent_i, agent_j, question): user_choice}
+            "preference_collection_queue": [],  # List of (agent_i, agent_j, question) tuples
+            "egs_viz_generated": False,
+            "egs_viz_data": None,
+            "egs_viz_method": "schur",
+            "egs_computing": False,
+            "user_choice": None  # Temporary storage for processing
         }
     
     state = st.session_state.llm_training_state
@@ -1212,7 +1266,11 @@ def render_llm_competition_tab():
                             if result["loaded_successfully"]:
                                 # Populate state with loaded data
                                 state["population"] = result["population"]
-                                state["egs_matrix"] = result["egs_matrix"]
+                                # Ensure perfect antisymmetry (fix any floating point errors)
+                                egs_matrix = result["egs_matrix"]
+                                if egs_matrix is not None:
+                                    egs_matrix = (egs_matrix - egs_matrix.T) / 2
+                                state["egs_matrix"] = egs_matrix
                                 
                                 # Recreate game with loaded preferences
                                 loaded_prefs = result["user_prefs"]
@@ -1339,12 +1397,11 @@ def render_llm_competition_tab():
         st.subheader("Run Training")
         
         # Initialize Training Button
+        phase = state.get("phase", "idle")
         init_button_disabled = (
             state.get("initializing", False) or 
-            state.get("waiting_for_feedback", False) or 
             state.get("initialized", False) or
-            state.get("generating_answers", False) or
-            state.get("improving_agent", False)
+            phase not in ["idle", "complete"]
         )
         
         if st.button("🚀 Initialize Training", type="primary", use_container_width=True, 
@@ -1357,13 +1414,11 @@ def render_llm_competition_tab():
                 st.warning("⚠️ Training already initialized. Use 'Reset Training' to start over.")
         
         # Reset Training Button
+        phase = state.get("phase", "idle")
         reset_button_disabled = (
             state.get("initializing", False) or 
-            state.get("waiting_for_feedback", False) or 
-            state.get("generating_answers", False) or
-            state.get("improving_agent", False) or
-            state.get("processing_feedback", False) or
-            not state.get("initialized", False)
+            not state.get("initialized", False) or
+            phase not in ["idle", "complete"]
         )
         
         if st.button("🔄 Reset Training", use_container_width=True, 
@@ -1381,22 +1436,17 @@ def render_llm_competition_tab():
             state["current_agent_b_idx"] = None
             state["training_history"] = []
             state["egs_matrix"] = None
-            state["waiting_for_feedback"] = False
             state["current_transcript"] = []
-            state["generating_answers"] = False
-            state["improving_agent"] = False
-            state["computing_egs"] = False
-            state["feedback_given"] = False
+            state["phase"] = "idle"
             state["initializing"] = False
-            state["processing_feedback"] = False
             state["user_choice"] = None
-            state["egs_answer_cache"] = {}  # Clear cache on reset
-            state["answer_cache"] = {}  # Clear answer cache
-            state["preference_cache"] = {}  # Clear preference cache
-            state["fixed_questions"] = None
-            state["collecting_preferences"] = False
+            state["answer_cache"] = {}
+            state["preference_cache"] = {}
             state["preference_collection_queue"] = []
-            state["current_preference_comparison"] = None
+            state["fixed_questions"] = None
+            state["egs_viz_generated"] = False
+            state["egs_viz_data"] = None
+            state["egs_computing"] = False
             state["user_mode"] = "interactive"
             state["llm_user_persona"] = "You are a 20 year old college student majoring in computer science at UPenn."
             st.success("✅ Training reset successfully!")
@@ -1433,49 +1483,33 @@ def render_llm_competition_tab():
                     status_placeholder.info("🔄 **Step 4/4:** Finalizing setup...")
                     state["initialized"] = True
                     state["current_game_idx"] = 0
-                    state["current_question_idx"] = 0  # Track which question we're on in the fixed set
+                    state["current_question_idx"] = 0
                     state["training_history"] = []
-                    state["waiting_for_feedback"] = False
                     state["current_transcript"] = []
                     state["egs_matrix"] = None
-                    state["generating_answers"] = False
-                    state["improving_agent"] = False
-                    state["computing_egs"] = False
-                    state["feedback_given"] = False
-                    state["initializing"] = False
-                    state["processing_feedback"] = False
+                    state["phase"] = "idle"
+                    state["answer_cache"] = {}
+                    state["preference_cache"] = {}
+                    state["preference_collection_queue"] = []
+                    state["egs_viz_generated"] = False
+                    state["egs_viz_data"] = None
+                    state["egs_viz_method"] = "schur"
+                    state["egs_computing"] = False
                     state["user_choice"] = None
-                    state["egs_answer_cache"] = {}
-                    state["egs_interactive_mode"] = False
-                    
-                    # Initialize caches for proper PSRO
-                    state["answer_cache"] = {}  # {(agent_idx, question): answer}
-                    state["preference_cache"] = {}  # {(agent_i, agent_j, question): user_choice}
-                    
-                    # State for collecting preferences after agent improvement
-                    state["collecting_preferences"] = False
-                    state["preference_collection_queue"] = []  # List of (agent_i, agent_j, question) tuples
-                    state["current_preference_comparison"] = None
                     
                     # Generate answers for initial agents on all fixed questions
                     fixed_questions = state.get("fixed_questions", [])
                     if fixed_questions:
                         status_placeholder.info("🔄 **Generating answers for initial agents...**")
-                        _generate_answers_for_agent(state, 0)
-                        _generate_answers_for_agent(state, 1)
+                        generate_answers_for_agent(state, 0)
+                        generate_answers_for_agent(state, 1)
                     
-                    # Add first new agent to train (copy the last one as starting point)
-                    if len(state["population"]) < state["n_agents"]:
-                        new_agent = state["population"][-1]
-                        state["population"].append(new_agent)
-                        agent_idx = len(state["population"]) - 1
-                        # For first agent, just use uniform selection (no preferences cached yet)
-                        import random
-                        opponent_idx = random.choice([0, 1])  # Choose from initial 2 agents
-                        state["current_agent_a_idx"] = agent_idx
-                        state["current_agent_b_idx"] = opponent_idx
-                        # Auto-start first game
-                        state["generating_answers"] = True
+                    # For the FIRST training (agent 1 vs agent 0), we need to run games
+                    # NOTE: We do NOT create agent 2 here - it will be created AFTER agent 1 is improved
+                    # First training: agent 1 (index 1) vs agent 0 (index 0)
+                    state["current_agent_a_idx"] = 1
+                    state["current_agent_b_idx"] = 0
+                    state["phase"] = "generating"
                     
                     status_placeholder.success("✅ **Training initialized successfully!** Starting first game...")
                     time.sleep(0.5)  # Brief pause to show success message
@@ -1526,15 +1560,14 @@ def render_llm_competition_tab():
         st.markdown("---")
         st.subheader("Current Status")
         
-        # Show processing feedback spinner and process the feedback
-        if state.get("processing_feedback", False):
-            if state.get("user_choice"):
-                # Show prominent success message
+        phase = state.get("phase", "idle")
+        
+        # Phase-based state machine - much simpler!
+        if phase == "processing":
+            # Process the user choice that was just recorded
+            user_choice = state.get("user_choice")
+            if user_choice:
                 st.success("✅ **Your preference has been recorded!** Processing feedback now...")
-                # Process the stored user choice
-                user_choice = state["user_choice"]
-                state["user_choice"] = None  # Clear it to prevent reprocessing
-                # Process feedback - this will update state and trigger rerun
                 try:
                     _process_user_feedback(state, user_choice)
                 except Exception as e:
@@ -1542,91 +1575,101 @@ def render_llm_competition_tab():
                     import traceback
                     with st.expander("Error Details"):
                         st.code(traceback.format_exc())
-                    # Reset state to allow retry
-                    state["processing_feedback"] = False
-                    state["feedback_given"] = False
-                    state["waiting_for_feedback"] = True
+                    state["phase"] = "waiting_feedback"
                     st.rerun()
             else:
-                # Processing feedback but no user_choice - might be stuck, reset
-                st.warning("⚠️ Processing feedback but no user choice found. Resetting state.")
-                state["processing_feedback"] = False
-                state["feedback_given"] = False
-                state["waiting_for_feedback"] = True
+                st.warning("⚠️ No user choice found. Resetting.")
+                state["phase"] = "waiting_feedback"
                 st.rerun()
         
-        # Show improving spinner if needed
-        elif state.get("improving_agent", False):
-            status_container = st.container()
-            with status_container:
-                st.info("🔄 **Improving agent strategy...**")
-                with st.spinner("Calling optimizer LLM to refine strategy (this may take 30-60 seconds)..."):
-                    _improve_agent_strategy(state)
-        
-        # Show generating answers status
-        elif state.get("generating_answers", False):
-            status_container = st.container()
-            with status_container:
-                st.info("🔄 **Generating answers from both agents...**")
-                try:
-                    with st.spinner("Calling LLM API to generate responses (this may take 30-60 seconds)..."):
-                        _start_next_game(state)
-                    
-                    state["generating_answers"] = False
-                    
-                    # If simulated user mode, automatically process feedback without asking user
-                    user_mode = state.get("user_mode", "interactive")
-                    if user_mode in ["simulated_feature", "simulated_llm"] and state.get("waiting_for_feedback", False):
-                        # Automatically simulate user choice
-                        question = state.get("current_question")
-                        answer_a = state.get("current_answer_a")
-                        answer_b = state.get("current_answer_b")
-                        if question and answer_a and answer_b:
-                            if user_mode == "simulated_feature":
-                                from games.llms.llm_competition import simulate_user_choice
-                                user_choice = simulate_user_choice(
-                                    answer_a, answer_b, 
-                                    state["game"].user_prefs, 
-                                    question
-                                )
-                            elif user_mode == "simulated_llm":
-                                from games.llms.llm_competition import simulate_user_choice_llm
-                                llm_persona = state.get("llm_user_persona", "You are a helpful user evaluating answers to questions.")
-                                user_choice = simulate_user_choice_llm(
-                                    answer_a, answer_b,
-                                    question,
-                                    llm_persona,
-                                    "streamlit_training"
-                                )
-                            # Process feedback automatically
-                            state["user_choice"] = user_choice
-                            state["processing_feedback"] = True
-                            state["feedback_given"] = True
-                            st.rerun()
-                    else:
-                        # Interactive mode - rerun to show waiting_for_feedback UI
-                        st.rerun()
-                except Exception as e:
-                    st.error(f"Error generating answers: {e}")
-                    import traceback
-                    with st.expander("Error Details"):
-                        st.code(traceback.format_exc())
-                    state["generating_answers"] = False
-                    state["waiting_for_feedback"] = False
-                    st.rerun()
-        
-        elif state.get("waiting_for_feedback") and state.get("user_mode", "interactive") == "interactive":
-            # Check if we're collecting preferences (after agent improvement) or training
-            collecting_preferences = state.get("collecting_preferences", False)
+        elif phase == "improving":
+            st.info("🔄 **Improving agent strategy...**")
+            # Don't use spinner here - it can interfere with st.rerun() calls inside _improve_agent_strategy
+            # Instead, just call the function and let it handle phase transitions
+            _improve_agent_strategy(state)
             
-            # Only set up next comparison if we don't have one ready
+            # Check current phase after improvement
+            current_phase = state.get("phase", "idle")
+            print(f"[DEBUG] After _improve_agent_strategy, phase is: {current_phase}")
+            
+            # If still in improving phase and we have enough agents, something went wrong
+            if current_phase == "improving":
+                print(f"[DEBUG] Still in improving phase after _improve_agent_strategy. Population: {len(state.get('population', []))}, target: {state.get('n_agents', 0)}")
+                # Force transition if we have enough agents
+                if len(state.get("population", [])) >= state.get("n_agents", 0):
+                    state["phase"] = "complete"
+                    print(f"[DEBUG] Forcing phase to 'complete'")
+                    st.rerun()
+                else:
+                    # Should have transitioned to waiting_feedback or another phase
+                    # If not, there might be an issue - log it
+                    print(f"[DEBUG] WARNING: Still in improving phase but should have transitioned")
+        
+        elif phase == "generating":
+            st.info("🔄 **Generating answers from both agents...**")
+            try:
+                with st.spinner("Calling LLM API to generate responses (this may take 30-60 seconds)..."):
+                    start_next_game(state)
+                
+                # If simulated user mode, automatically process feedback
+                user_mode = state.get("user_mode", "interactive")
+                if user_mode in ["simulated_feature", "simulated_llm"]:
+                    question = state.get("current_question")
+                    answer_a = state.get("current_answer_a")
+                    answer_b = state.get("current_answer_b")
+                    if question and answer_a and answer_b:
+                        if user_mode == "simulated_feature":
+                            from games.llms.llm_competition import simulate_user_choice
+                            user_choice = simulate_user_choice(
+                                answer_a, answer_b, state["game"].user_prefs, question
+                            )
+                        else:  # simulated_llm
+                            from games.llms.llm_competition import simulate_user_choice_llm
+                            llm_persona = state.get("llm_user_persona", "You are a helpful user evaluating answers to questions.")
+                            user_choice = simulate_user_choice_llm(
+                                answer_a, answer_b, question, llm_persona, "streamlit_training"
+                            )
+                        _process_user_feedback(state, user_choice)
+                        return
+                
+                # Interactive mode - show feedback UI
+                state["phase"] = "waiting_feedback"
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error generating answers: {e}")
+                import traceback
+                with st.expander("Error Details"):
+                    st.code(traceback.format_exc())
+                state["phase"] = "idle"
+                st.rerun()
+        
+        elif phase == "waiting_feedback":
+            # Unified UI for both training games and preference collection
+            collecting_preferences = (phase == "waiting_feedback" and state.get("preference_collection_queue", []))
+            
+            # Set up next comparison if needed (for preference collection)
             if collecting_preferences:
-                # Check if we need to set up a new comparison
+                from datetime import datetime
+                preference_queue = state.get("preference_collection_queue", [])
+                preference_cache = state.get("preference_cache", {})
+                
+                # Check if all preferences in queue are now cached
+                missing_prefs = [(c[0], c[1], c[2]) for c in preference_queue if (c[0], c[1], c[2]) not in preference_cache]
+                print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Preference collection: {len(preference_queue) - len(missing_prefs)}/{len(preference_queue)} collected, {len(missing_prefs)} remaining")
+                
+                if not missing_prefs:
+                    # All preferences collected - clear queue and continue
+                    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] ✅ All preferences collected! Clearing queue and calling _continue_to_next_agent...")
+                    state["preference_collection_queue"] = []
+                    state["collecting_preferences"] = False
+                    _continue_to_next_agent(state)
+                    return
+                
+                # Still need to collect more preferences - set up next comparison
                 has_current = state.get("current_question") and state.get("current_answer_a") and state.get("current_answer_b")
                 if not has_current:
-                    _setup_next_preference_comparison(state)
-                    # If _setup_next_preference_comparison called st.rerun(), we'll return here
-                    # Otherwise continue to show the UI
+                    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Setting up next preference comparison...")
+                    setup_next_preference_comparison(state)
             
             # Show progress if collecting preferences
             if collecting_preferences:
@@ -1634,7 +1677,11 @@ def render_llm_competition_tab():
                 preference_cache = state.get("preference_cache", {})
                 completed = len([c for c in preference_queue if (c[0], c[1], c[2]) in preference_cache])
                 total = len(preference_queue)
-                st.info(f"**Progress:** {completed} / {total} comparisons completed")
+                st.info(f"📊 **Preference Collection:** {completed} / {total} comparisons completed")
+            else:
+                games_played = len(state.get("current_transcript", []))
+                games_needed = state.get("n_games_per_agent", 1)
+                st.info(f"🎮 **Training Game:** {games_played} / {games_needed} games played")
             
             st.subheader("⏳ Waiting for Your Feedback")
             
@@ -1644,97 +1691,134 @@ def render_llm_competition_tab():
                 # Buttons at the top
                 st.markdown("---")
                 col_btn1, col_btn2, col_btn3 = st.columns(3)
-                button_disabled = state.get("feedback_given", False) or state.get("processing_feedback", False)                
                 with col_btn1:
-                    if st.button("✅ Prefer Answer A", type="primary", use_container_width=True, 
-                                key="prefer_a", disabled=button_disabled):                        _handle_user_choice(state, "A")
-                
+                    if st.button("✅ Prefer Answer A", type="primary", use_container_width=True, key="pref_a"):
+                        handle_user_choice(state, "A")
                 with col_btn2:
-                    if st.button("🤝 Tie / No Preference", use_container_width=True, 
-                                key="prefer_tie", disabled=button_disabled):                        _handle_user_choice(state, "TIE")
-                
+                    if st.button("🤝 Tie / No Preference", use_container_width=True, key="pref_tie"):
+                        handle_user_choice(state, "TIE")
                 with col_btn3:
-                    if st.button("✅ Prefer Answer B", type="primary", use_container_width=True, 
-                                key="prefer_b", disabled=button_disabled):                        _handle_user_choice(state, "B")                
+                    if st.button("✅ Prefer Answer B", type="primary", use_container_width=True, key="pref_b"):
+                        handle_user_choice(state, "B")
                 st.markdown("---")
                 
-                # Answers displayed below buttons without boxes, using native markdown
+                # Answers displayed below buttons
                 col_a, col_b = st.columns(2)
-                
                 with col_a:
                     st.markdown("### Answer A")
                     st.markdown(state["current_answer_a"])
-                
                 with col_b:
                     st.markdown("### Answer B")
                     st.markdown(state["current_answer_b"])
         
-        elif len(state["population"]) < state["n_agents"]:
-            # Auto-start next game if not waiting for feedback and not already generating
-            if (not state.get("waiting_for_feedback", False) and 
-                not state.get("generating_answers", False) and 
-                not state.get("improving_agent", False) and
-                not state.get("processing_feedback", False)):
-                # Automatically start the next game
-                state["generating_answers"] = True
-                st.rerun()
-        else:
+        elif phase == "idle" and len(state["population"]) < state["n_agents"]:
+            # Auto-start next training (will use cached preferences if available)
+            _continue_to_next_agent(state)
+        elif phase == "complete" or len(state["population"]) >= state["n_agents"]:
             # Training complete
+            from datetime import datetime
+            print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] In 'complete' phase block. Population: {len(state.get('population', []))}, n_agents: {state.get('n_agents', 0)}")
+            print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] egs_matrix: {state.get('egs_matrix') is None}, egs_computing: {state.get('egs_computing', False)}")
+            
             st.success("🎉 Training Complete! All agents have been trained.")
             
             # Auto-compute EGS if not done yet
-            if state.get("computing_egs", False):
-                state["computing_egs"] = False
+            if state.get("egs_matrix") is None and not state.get("egs_computing", False):
+                from datetime import datetime
+                print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Starting EGS matrix computation...")
+                print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Population size: {len(state.get('population', []))}")
+                print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Preference cache size: {len(state.get('preference_cache', {}))}")
+                print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Fixed questions: {len(state.get('fixed_questions', []))}")
+                
                 user_mode = state.get("user_mode", "interactive")
                 
-                # Compute EGS from cached preferences
-                egs_matrix = _compute_egs_from_cache(state)
+                # Mark as computing to prevent multiple attempts
+                state["egs_computing"] = True
+                
+                # Show loading indicator
+                st.info("🔄 **Computing Empirical Gamescape Matrix...**")
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                # Step 1: Try to compute from cached preferences
+                status_text.info("📊 Step 1/2: Computing EGS matrix from cached preferences...")
+                progress_bar.progress(0.3)
+                print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Calling compute_egs_from_cache...")
+                
+                egs_matrix = compute_egs_from_cache(state)
+                
+                print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] compute_egs_from_cache returned: {egs_matrix is not None}")
                 if egs_matrix is not None:
+                    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] EGS matrix shape: {egs_matrix.shape}")
+                    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] EGS matrix min/max: {egs_matrix.min():.3f} / {egs_matrix.max():.3f}")
+                
+                if egs_matrix is not None:
+                    # Successfully computed from cache
+                    # Ensure perfect antisymmetry (fix any floating point errors)
+                    egs_matrix = (egs_matrix - egs_matrix.T) / 2
+                    progress_bar.progress(1.0)
+                    status_text.success("✅ EGS matrix computed from cached preferences!")
                     state["egs_matrix"] = egs_matrix
-                    st.success("✅ EGS matrix computed from cached preferences!")
-                    st.rerun()
+                    state["egs_viz_generated"] = False  # Reset to trigger auto-generation
+                    state["egs_computing"] = False
+                    progress_bar.empty()
+                    status_text.empty()
+                    # Don't rerun here - let the page render naturally and generate visualization
+                    # st.rerun()  # Removed to prevent infinite loop
                 else:
                     # Some preferences missing - compute using standard method
                     if user_mode in ["simulated_feature", "simulated_llm"]:
-                        # Simulated mode: compute automatically using refactored function
-                        with st.spinner("Computing empirical gamescape matrix..."):
-                            try:
-                                from games.llms.llm_competition import compute_empirical_gamescape
-                                
-                                # Progress callback for UI
-                                progress_placeholder = st.empty()
-                                progress_bar_placeholder = st.empty()
-                                
-                                def progress_callback(msg, ratio):
-                                    progress_placeholder.info(f"🔄 {msg}")
-                                    progress_bar_placeholder.progress(ratio)
-                                
-                                egs_matrix = compute_empirical_gamescape(
-                                    population=state["population"],
-                                    game=state["game"],
-                                    evaluator=None,  # Use game's default evaluator
-                                    n_questions_per_pair=len(state.get("fixed_questions", [])),
-                                    use_cache=True,
-                                    progress_callback=progress_callback
-                                )
-                                
-                                progress_placeholder.empty()
-                                progress_bar_placeholder.empty()
-                                state["egs_matrix"] = egs_matrix
-                                st.success("✅ EGS matrix computed!")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Error computing EGS matrix: {str(e)}")
-                                import traceback
+                    # Simulated mode: compute automatically using refactored function
+                        status_text.info("📊 Step 2/2: Computing EGS matrix (simulated mode)...")
+                        progress_bar.progress(0.5)
+                        
+                        try:
+                            from games.llms.llm_competition import compute_empirical_gamescape
+                            
+                            def progress_callback(msg, ratio):
+                                # Map callback ratio (0-1) to our progress bar range (0.5-1.0)
+                                progress_bar.progress(0.5 + (ratio * 0.5))
+                                status_text.info(f"🔄 {msg}")
+                            
+                            egs_matrix = compute_empirical_gamescape(
+                                population=state["population"],
+                                game=state["game"],
+                                evaluator=None,  # Use game's default evaluator
+                                n_questions_per_pair=len(state.get("fixed_questions", [])),
+                                use_cache=True,
+                                progress_callback=progress_callback
+                            )
+                            
+                            # Ensure perfect antisymmetry (fix any floating point errors)
+                            egs_matrix = (egs_matrix - egs_matrix.T) / 2
+                            progress_bar.progress(1.0)
+                            status_text.success("✅ EGS matrix computed!")
+                            progress_bar.empty()
+                            status_text.empty()
+                            state["egs_matrix"] = egs_matrix
+                            state["egs_viz_generated"] = False
+                            state["egs_computing"] = False
+                            st.rerun()
+                        except Exception as e:
+                            progress_bar.empty()
+                            status_text.empty()
+                            state["egs_computing"] = False
+                            st.error(f"Error computing EGS matrix: {str(e)}")
+                            import traceback
+                            with st.expander("Error Details"):
                                 st.code(traceback.format_exc())
                     else:
                         # Interactive mode: initialize interactive EGS computation
+                        progress_bar.empty()
+                        status_text.empty()
+                        state["egs_computing"] = False
                         state["egs_interactive_mode"] = True
-                    state["egs_comparisons"] = []  # List of (i, j, question, answer_i, answer_j, user_choice)
-                    state["egs_current_comparison"] = None
-                    state["egs_comparison_idx"] = 0
-                    st.info("🔄 **Interactive EGS Mode:** You'll be asked to compare agents. Starting...")
-                    st.rerun()
+                        state["egs_comparisons"] = []  # List of (i, j, question, answer_i, answer_j, user_choice)
+                        state["egs_current_comparison"] = None
+                        state["egs_comparison_idx"] = 0
+                        st.info("🔄 **Interactive EGS Mode:** You'll be asked to compare agents. Starting...")
+                        # Don't rerun - let the page render naturally
+                        # st.rerun()  # Removed to prevent infinite loop
             
             # Post-training features
             st.markdown("---")
@@ -1852,6 +1936,10 @@ def render_llm_competition_tab():
             
             # Display EGS matrix if computed (either from training or loaded experiment)
             if state.get("egs_matrix") is not None:
+                st.markdown("---")
+                st.subheader("📊 Empirical Gamescape Analysis")
+                st.markdown("**Matrix and visualizations computed from all agent comparisons.**")
+                
                 # Check if we have saved visualization files from a loaded experiment
                 loaded_viz_files = state.get("loaded_experiment_viz_files", [])
                 show_saved_viz = False
@@ -1909,18 +1997,88 @@ def render_llm_competition_tab():
                     )
                     plt.close(fig)
                 
-                # EGS embeddings visualization
+                # EGS embeddings visualization - auto-generate default (Schur) and show all methods
                 st.markdown("#### EGS Embeddings Visualization")
+                
+                # Auto-generate default visualization if not already done
+                # Use a separate flag to prevent re-entry during generation
+                if (state.get("egs_matrix") is not None and 
+                    not state.get("egs_viz_generated", False) and 
+                    not state.get("egs_viz_generating", False)):
+                    # Set generating flag BEFORE any UI operations to prevent re-entry
+                    state["egs_viz_generating"] = True
+                    
+                    try:
+                        from games.egs import EmpiricalGS, visualize_egs_matrix_and_embeddings
+                        import tempfile
+                        import os
+                        
+                        # Ensure matrix is perfectly antisymmetric before creating EmpiricalGS
+                        egs_matrix = state["egs_matrix"].copy()
+                        egs_matrix = (egs_matrix - egs_matrix.T) / 2
+                        
+                        # Create UI elements AFTER setting the flag
+                        st.info("🔄 **Generating default visualization (Schur)...**")
+                        progress_viz = st.progress(0)
+                        
+                        progress_viz.progress(0.2)
+                        egs = EmpiricalGS(egs_matrix)
+                        progress_viz.progress(0.5)
+                        embeddings = egs.schur_embeddings()
+                        progress_viz.progress(0.7)
+                        
+                        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+                            tmp_path = tmp_file.name
+                        
+                        visualize_egs_matrix_and_embeddings(egs, embeddings, save_path=tmp_path)
+                        progress_viz.progress(0.9)
+                        
+                        with open(tmp_path, 'rb') as f:
+                            img_data = base64.b64encode(f.read()).decode()
+                        
+                        os.unlink(tmp_path)
+                        progress_viz.progress(1.0)
+                        
+                        # Update state atomically
+                        state["egs_viz_generated"] = True
+                        state["egs_viz_data"] = img_data
+                        state["egs_viz_method"] = "schur"
+                        state["egs_viz_generating"] = False
+                        progress_viz.empty()
+                        # Don't rerun - visualization will show on next natural render
+                        # st.rerun()  # Removed to prevent infinite loop
+                    except Exception as e:
+                        # Clear generating flag and mark as generated to prevent retry loop
+                        state["egs_viz_generating"] = False
+                        state["egs_viz_generated"] = True
+                        progress_viz.empty()
+                        st.error(f"Error generating default visualization: {str(e)}")
+                        import traceback
+                        with st.expander("Error Details"):
+                            st.code(traceback.format_exc())
+                
+                # Show default visualization if available
+                if state.get("egs_viz_data"):
+                    st.markdown(f"**Default Visualization ({state.get('egs_viz_method', 'schur').upper()}):**")
+                    st.markdown(
+                        f'<img src="data:image/png;base64,{state["egs_viz_data"]}" style="max-width: 100%;" />',
+                        unsafe_allow_html=True
+                    )
+                
+                # Allow user to generate other methods
                 embedding_method = st.selectbox(
-                    "Embedding Method",
+                    "Generate Additional Embedding Method",
                     ["schur", "PCA", "SVD", "tSNE"],
-                    index=0
+                    index=0,
+                    key="egs_embedding_method"
                 )
                 
-                if st.button("📈 Generate Embedding Visualization"):
+                if st.button("📈 Generate Additional Visualization"):
                     with st.spinner(f"Generating {embedding_method} embeddings..."):
                         try:
-                            from games.egs import visualize_egs_matrix_and_embeddings
+                            from games.egs import EmpiricalGS, visualize_egs_matrix_and_embeddings
+                            import tempfile
+                            import os
                             
                             egs = EmpiricalGS(state["egs_matrix"])
                             
@@ -1937,24 +2095,17 @@ def render_llm_competition_tab():
                                 else:
                                     embeddings = egs.tSNE_embeddings()
                             
-                            # Use the existing visualization function directly
-                            # Save to a temporary file, then read it for display
-                            import tempfile
-                            import os
-                            
                             with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
                                 tmp_path = tmp_file.name
                             
-                            # Call the function to generate and save the visualization
                             visualize_egs_matrix_and_embeddings(egs, embeddings, save_path=tmp_path)
                             
-                            # Read the saved file and convert to base64
                             with open(tmp_path, 'rb') as f:
                                 img_data = base64.b64encode(f.read()).decode()
                             
-                            # Clean up temp file
                             os.unlink(tmp_path)
                             
+                            st.markdown(f"**{embedding_method.upper()} Visualization:**")
                             st.markdown(
                                 f'<img src="data:image/png;base64,{img_data}" style="max-width: 100%;" />',
                                 unsafe_allow_html=True
@@ -2147,381 +2298,91 @@ def render_llm_competition_tab():
         st.info("👆 Click 'Initialize Training' to begin.")
 
 
-def _start_next_game(state):
-    """Start the next game - uses fixed questions and cached answers when available."""
-    import random
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-    from games.llms.llm_competition import COMPETITION_GAME_PROMPT, call_model
-    
-    if not state["initialized"] or not state["game"]:
-        return
-    
-    population = state["population"]
-    if len(population) < 2:
-        st.error("Not enough agents!")
-        return
-    
-    # Select agent to train (last one) and opponent using PSRO method
-    agent_idx = len(population) - 1
-    opponent_idx = _select_opponent_psro(state, agent_idx)    
-    # Use fixed questions - cycle through them systematically
-    fixed_questions = state.get("fixed_questions", state["game"].questions)
-    if not fixed_questions:
-        st.error("No fixed questions available!")
-        return
-    
-    # Cycle through questions systematically
-    current_question_idx = state.get("current_question_idx", 0)
-    question = fixed_questions[current_question_idx % len(fixed_questions)]
-    
-    # Move to next question for next game
-    state["current_question_idx"] = (current_question_idx + 1) % len(fixed_questions)    
-    # Check cache first
-    answer_cache = state.get("answer_cache", {})
-    answer_a = answer_cache.get((agent_idx, question))
-    answer_b = answer_cache.get((opponent_idx, question))    
-    # Generate answers if not cached
-    if answer_a is None:
-        u_prompt = population[agent_idx]
-        full_u = f"{COMPETITION_GAME_PROMPT}\n\n{u_prompt}\n\nQuestion: {question}\n\nProvide your answer:"
-        answer_a = call_model(full_u, f"agent_{agent_idx}_q_{fixed_questions.index(question)}")
-        answer_cache[(agent_idx, question)] = answer_a
-        state["answer_cache"] = answer_cache
-    
-    if answer_b is None:
-        v_prompt = population[opponent_idx]
-        full_v = f"{COMPETITION_GAME_PROMPT}\n\n{v_prompt}\n\nQuestion: {question}\n\nProvide your answer:"
-        answer_b = call_model(full_v, f"agent_{opponent_idx}_q_{fixed_questions.index(question)}")
-        answer_cache[(opponent_idx, question)] = answer_b
-        state["answer_cache"] = answer_cache    
-    # Set state after both answers are ready
-    state["current_question"] = question
-    state["current_answer_a"] = answer_a
-    state["current_answer_b"] = answer_b
-    state["current_agent_a_idx"] = agent_idx
-    state["current_agent_b_idx"] = opponent_idx
-    state["waiting_for_feedback"] = True
-    state["feedback_given"] = False  # Reset feedback flag for new game
-    state["current_game_idx"] += 1
-
-
-def _setup_next_preference_comparison(state):
-    """Set up the next comparison from the preference queue for display."""
-    preference_queue = state.get("preference_collection_queue", [])
-    answer_cache = state.get("answer_cache", {})
-    preference_cache = state.get("preference_cache", {})
-    
-    if not preference_queue:
-        # All preferences collected, continue with next agent
-        state["collecting_preferences"] = False
-        state["preference_collection_queue"] = []
-        state["waiting_for_feedback"] = False
-        
-        # Continue with next agent or finish
-        if len(state["population"]) < state["n_agents"]:
-            new_agent = state["population"][-1]
-            state["population"].append(new_agent)
-            agent_idx = len(state["population"]) - 1
-            opponent_idx = _select_opponent_psro(state, agent_idx)
-            state["current_agent_a_idx"] = agent_idx
-            state["current_agent_b_idx"] = opponent_idx
-            state["generating_answers"] = True
-        else:
-            if state["egs_matrix"] is None:
-                state["computing_egs"] = True
-        st.rerun()
-        return
-    
-    # Find the first unanswered comparison
-    current_comparison = None
-    for comparison in preference_queue:
-        agent_i, agent_j, question = comparison
-        cache_key = (agent_i, agent_j, question)
-        if cache_key not in preference_cache:
-            current_comparison = comparison
-            break
-    
-    if not current_comparison:
-        # All done, clear and continue
-        state["collecting_preferences"] = False
-        state["preference_collection_queue"] = []
-        state["waiting_for_feedback"] = False
-        st.rerun()
-        return
-    
-    # Set up state for this comparison (reusing the same state variables as training)
-    agent_i, agent_j, question = current_comparison
-    answer_i = answer_cache.get((agent_i, question))
-    answer_j = answer_cache.get((agent_j, question))
-    
-    if not answer_i or not answer_j:
-        st.error("Missing answers for this comparison. Please refresh.")
-        return
-    
-    # Use the same state variables as training feedback
-    state["current_question"] = question
-    state["current_answer_a"] = answer_i
-    state["current_answer_b"] = answer_j
-    state["current_agent_a_idx"] = agent_i
-    state["current_agent_b_idx"] = agent_j
-    # Don't call st.rerun() here - let the UI render naturally
-
-
-def _handle_user_choice(state, user_choice):
-    """Handle user choice - either for training feedback or preference collection."""
-    collecting_preferences = state.get("collecting_preferences", False)
-    if collecting_preferences:
-        # Store in preference cache
-        agent_i = state.get("current_agent_a_idx")
-        agent_j = state.get("current_agent_b_idx")
-        question = state.get("current_question")
-        cache_key = (agent_i, agent_j, question)
-        
-        preference_cache = state.get("preference_cache", {})
-        preference_cache[cache_key] = user_choice
-        state["preference_cache"] = preference_cache
-        
-        # Clear current comparison so _setup_next_preference_comparison will load the next one
-        state["current_question"] = None
-        state["current_answer_a"] = None
-        state["current_answer_b"] = None
-        state["feedback_given"] = False
-        st.rerun()
-    else:
-        # Training feedback - process normally
-        state["feedback_given"] = True
-        state["processing_feedback"] = True
-        state["user_choice"] = user_choice
-        st.rerun()
-
-
 def _process_user_feedback(state, user_choice):
-    """Process user feedback and continue training."""
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-    from games.llms.llm_competition import get_opt_prompt, OPT_SYSTEM_PROMPT, COMPETITION_GAME_PROMPT
-    import google.generativeai as genai
-    import os
-    
-    # Check if we have the necessary state to process feedback
-    # We need at least a question and answers
+    """Process user feedback - works for both training games and preference collection."""
     if not state.get("current_question") or not state.get("current_answer_a") or not state.get("current_answer_b"):
-        # Missing required data, can't process
-        st.warning("⚠️ Missing required data to process feedback. Resetting state.")
-        state["processing_feedback"] = False
-        state["waiting_for_feedback"] = False
-        state["feedback_given"] = False
-        # Try to continue with next game
-        if len(state.get("current_transcript", [])) < state.get("n_games_per_agent", 1):
-            state["generating_answers"] = True
+        st.warning("⚠️ Missing required data. Resetting.")
+        state["phase"] = "idle"
         st.rerun()
         return
-    
-    # Check if we've already processed this specific feedback by checking the transcript
-    # This prevents double-processing if the function is called multiple times
-    current_q = state.get("current_question")
-    current_transcript = state.get("current_transcript", [])
-    if current_q and current_transcript:
-        # Check if this exact question-answer pair is already in transcript
-        current_answer_a = state.get("current_answer_a")
-        current_answer_b = state.get("current_answer_b")
-        already_processed = any(
-            entry[0] == current_q and entry[1] == current_answer_a and entry[2] == current_answer_b
-            for entry in current_transcript
-        )
-        if already_processed:
-            # Already processed this exact feedback, just update state and continue
-            if len(current_transcript) >= state["n_games_per_agent"]:
-                state["improving_agent"] = True
-                state["waiting_for_feedback"] = False
-                state["processing_feedback"] = False
-                st.rerun()
-                return
-            else:
-                state["waiting_for_feedback"] = False
-                state["processing_feedback"] = False
-                state["generating_answers"] = True
-                state["feedback_given"] = False
-                st.rerun()
-                return
-    
-    # Mark feedback as given immediately to prevent double-clicks
-    state["feedback_given"] = True
-    
-    # Calculate payout (1 = A wins, -1 = B wins, 0 = tie)
-    payout = 1 if user_choice == "A" else (-1 if user_choice == "B" else 0)
-    
-    # Add to transcript
-    transcript_entry = (
-        state["current_question"],
-        state["current_answer_a"],
-        state["current_answer_b"],
-        payout
-    )
-    
-    if "current_transcript" not in state:
-        state["current_transcript"] = []
-    state["current_transcript"].append(transcript_entry)
     
     agent_idx = state["current_agent_a_idx"]
     opponent_idx = state["current_agent_b_idx"]
-    
-    # Also store in preference cache for PSRO and EGS computation
     question = state["current_question"]
+    
+    # Always store in preference cache
+    from datetime import datetime
     preference_cache = state.get("preference_cache", {})
     cache_key = (agent_idx, opponent_idx, question)
+    collecting_preferences = bool(state.get("preference_collection_queue", []))
+    
+    if cache_key in preference_cache:
+        print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Preference already exists in cache: {cache_key}, overwriting...")
+    else:
+        context = "preference collection" if collecting_preferences else "training game"
+        print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Caching preference for {context}: agent {agent_idx} vs {opponent_idx} = {user_choice}")
+    
     preference_cache[cache_key] = user_choice
     state["preference_cache"] = preference_cache
     
-    # Clear processing flag before deciding next step
-    state["processing_feedback"] = False
+    # Check if this is a training game or preference collection
+    collecting_preferences = bool(state.get("preference_collection_queue", []))
     
-    # Check if we've played enough games to improve the agent
-    games_played = len(state["current_transcript"])
-    games_needed = state["n_games_per_agent"]
-    
-    if games_played >= games_needed:
-        # Need to improve agent - set flag and rerun to show spinner
-        state["improving_agent"] = True
-        state["waiting_for_feedback"] = False
+    if collecting_preferences:
+        # Preference collection: just move to next comparison
+        state["current_question"] = None
+        state["current_answer_a"] = None
+        state["current_answer_b"] = None
+        state["phase"] = "waiting_feedback"
         st.rerun()
     else:
-        # Not enough games yet - continue with next game
-        state["waiting_for_feedback"] = False
-        state["generating_answers"] = True
-        state["feedback_given"] = False  # Reset for next game
+        # Training game: add to transcript and check if we need more games
+        payout = 1 if user_choice == "A" else (-1 if user_choice == "B" else 0)
+        transcript_entry = (question, state["current_answer_a"], state["current_answer_b"], payout)
+        state["current_transcript"].append(transcript_entry)
+        
+        # Check if we've played enough games
+        if len(state["current_transcript"]) >= state["n_games_per_agent"]:
+            state["phase"] = "improving"
+        else:
+            state["phase"] = "generating"
+        
+        # Clear current comparison
+        state["current_question"] = None
+        state["current_answer_a"] = None
+        state["current_answer_b"] = None
         st.rerun()
-
-
-def _generate_answers_for_agent(state, agent_idx):
-    """Generate answers for an agent on all fixed questions and cache them."""
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-    from games.llms.llm_competition import COMPETITION_GAME_PROMPT, call_model
-    
-    fixed_questions = state.get("fixed_questions", [])
-    answer_cache = state.get("answer_cache", {})
-    population = state["population"]
-    
-    for question in fixed_questions:
-        cache_key = (agent_idx, question)
-        if cache_key not in answer_cache:
-            full_prompt = f"{COMPETITION_GAME_PROMPT}\n\n{population[agent_idx]}\n\nQuestion: {question}\n\nProvide your answer:"
-            answer = call_model(full_prompt, f"agent_{agent_idx}_q_{fixed_questions.index(question)}")
-            answer_cache[cache_key] = answer
-    
-    state["answer_cache"] = answer_cache
-
-
-def _compute_agent_scores(state, agent_i, agent_j):
-    """
-    Compute average score for agent_i against agent_j across all fixed questions.
-    Returns average score (positive = i beats j, negative = j beats i, 0 = tie).
-    """
-    fixed_questions = state.get("fixed_questions", [])
-    preference_cache = state.get("preference_cache", {})
-    
-    scores = []
-    for question in fixed_questions:
-        cache_key = (agent_i, agent_j, question)
-        if cache_key in preference_cache:
-            user_choice = preference_cache[cache_key]
-            # Convert to score: "A" (i wins) = 1, "B" (j wins) = -1, "TIE" = 0
-            if user_choice == "A":
-                scores.append(1)
-            elif user_choice == "B":
-                scores.append(-1)
-            else:  # TIE
-                scores.append(0)
-    
-    if not scores:
-        return 0.0  # No preferences cached yet
-    
-    return sum(scores) / len(scores)
-
-
-def _select_opponent_psro(state, agent_idx):
-    """
-    Select opponent for agent_idx based on PSRO method (uniform, weaker, or stronger).
-    Uses cached preferences to determine weaker/stronger agents.
-    Falls back to uniform if no preferences are cached yet.
-    """
-    import random
-    import numpy as np
-    
-    population = state["population"]
-    improvement_method = state.get("improvement_method", "uniform")
-    available_indices = [i for i in range(len(population)) if i != agent_idx]
-    
-    if not available_indices:
-        return agent_idx  # Fallback to self-play
-    
-    if improvement_method == "uniform":
-        return random.choice(available_indices)
-    
-    # For weaker/stronger, compute scores against all available agents
-    agent_scores = {}
-    has_any_preferences = False
-    for opponent_idx in available_indices:
-        score = _compute_agent_scores(state, agent_idx, opponent_idx)
-        agent_scores[opponent_idx] = score
-        # Check if we have any preferences for this pair
-        fixed_questions = state.get("fixed_questions", [])
-        for question in fixed_questions:
-            if (agent_idx, opponent_idx, question) in state.get("preference_cache", {}):
-                has_any_preferences = True
-                break
-    
-    # If no preferences cached yet, fall back to uniform
-    if not has_any_preferences:
-        return random.choice(available_indices)
-    
-    if improvement_method == "weaker":
-        # Select from agents that agent_idx beats (score > 0)
-        weaker_indices = [idx for idx, score in agent_scores.items() if score > 0]
-        if weaker_indices:
-            return random.choice(weaker_indices)
-        # Fallback to uniform if no weaker agents
-        return random.choice(available_indices)
-    
-    elif improvement_method == "stronger":
-        # Select from agents that beat agent_idx (score < 0)
-        stronger_indices = [idx for idx, score in agent_scores.items() if score < 0]
-        if stronger_indices:
-            return random.choice(stronger_indices)
-        # Fallback to uniform if no stronger agents
-        return random.choice(available_indices)
-    
-    # Default fallback
-    return random.choice(available_indices)
 
 
 def _improve_agent_strategy(state):
     """Improve agent strategy based on collected transcript."""
+    if state.get("phase") != "improving":
+        return
+    
     import sys
     from pathlib import Path
+    from datetime import datetime
     sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
     from games.llms.llm_competition import improve_strategy, COMPETITION_GAME_PROMPT
-    
-    if not state.get("improving_agent", False):
-        return
     
     agent_idx = state["current_agent_a_idx"]
     opponent_idx = state["current_agent_b_idx"]
     
+    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Starting agent improvement: agent {agent_idx} vs opponent {opponent_idx}")
+    
     # Improve the agent using optimizer
     u_prompt = state["population"][agent_idx]
     v_prompt = state["population"][opponent_idx]
-    
-    # Use the refactored improve_strategy function
     transcript = state["current_transcript"]
+    
+    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Transcript has {len(transcript)} entries")
+    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] About to call improve_strategy (this will call LLM API)...")
+    
     try:
         u_new = improve_strategy(u_prompt, v_prompt, transcript, COMPETITION_GAME_PROMPT)
+        print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] ✅ Agent improvement completed successfully")
     except Exception as e:
+        print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] ❌ Error improving agent: {e}")
         st.warning(f"Error improving agent: {e}")
         u_new = u_prompt
     
@@ -2529,11 +2390,11 @@ def _improve_agent_strategy(state):
     state["population"][agent_idx] = u_new
     
     # Store history
-    avg_payout = sum(t[3] for t in state["current_transcript"]) / len(state["current_transcript"])
+    avg_payout = sum(t[3] for t in transcript) / len(transcript) if transcript else 0
     state["training_history"].append({
         "agent_idx": agent_idx,
         "opponent_idx": opponent_idx,
-        "transcript": state["current_transcript"],
+        "transcript": transcript,
         "avg_payout": avg_payout,
         "old_strategy": u_prompt,
         "new_strategy": u_new
@@ -2541,106 +2402,192 @@ def _improve_agent_strategy(state):
     
     # Clear transcript
     state["current_transcript"] = []
-    state["improving_agent"] = False
-    state["waiting_for_feedback"] = False
     
-    # After improving agent, generate answers for all fixed questions FIRST
-    # This ensures all answers are ready before asking for preferences
-    # Note: _generate_answers_for_agent already handles caching, so this should be fast if cached
-    _generate_answers_for_agent(state, agent_idx)
+    # Generate answers for improved agent on all fixed questions
+    generate_answers_for_agent(state, agent_idx)
     
-    # If interactive mode, set up preference collection for new agent vs all existing agents
-    if state.get("user_mode", "interactive") == "interactive":
-        # Build queue of comparisons needed: (agent_idx, existing_agent_idx, question)
-        preference_queue = []
-        fixed_questions = state.get("fixed_questions", [])
-        for existing_idx in range(agent_idx):  # Compare with all previous agents
-            for question in fixed_questions:
-                cache_key = (agent_idx, existing_idx, question)
-                # Only add if not already cached
-                if cache_key not in state.get("preference_cache", {}):
-                    preference_queue.append((agent_idx, existing_idx, question))
-        
-        if preference_queue:
-            state["preference_collection_queue"] = preference_queue
-            state["collecting_preferences"] = True
-            state["preference_comparisons_pending"] = {}  # Track which comparisons are pending
-            st.rerun()
-            return
-    
-    # If simulated mode, automatically generate preferences
+    # Collect preferences for the IMPROVED agent vs all existing agents
+    # IMPORTANT: We always need preferences for the improved agent vs ALL existing agents,
+    # even if some were collected during training games. This ensures we have complete
+    # preference data for PSRO selection and EGS computation.
     user_mode = state.get("user_mode", "interactive")
-    if user_mode in ["simulated_feature", "simulated_llm"]:
-        _generate_simulated_preferences_for_agent(state, agent_idx)
-    
-    # Continue with next agent or finish
-    if len(state["population"]) < state["n_agents"]:
-        new_agent = state["population"][-1]
-        state["population"].append(new_agent)
-        # Select opponent using PSRO method
-        agent_idx = len(state["population"]) - 1
-        opponent_idx = _select_opponent_psro(state, agent_idx)
-        state["current_agent_a_idx"] = agent_idx
-        state["current_agent_b_idx"] = opponent_idx
-        # Auto-start next game
-        state["generating_answers"] = True
-    else:
-        # Training complete - compute EGS automatically
-        if state["egs_matrix"] is None:
-            state["computing_egs"] = True
-    
-    st.rerun()
-
-
-def _compute_egs_from_cache(state):
-    """
-    Compute EGS matrix from cached preferences.
-    Returns None if some preferences are missing.
-    """
-    import numpy as np
-    
-    population = state["population"]
-    n = len(population)
+    preference_queue = []
     fixed_questions = state.get("fixed_questions", [])
     preference_cache = state.get("preference_cache", {})
     
-    if not fixed_questions:
-        return None
+    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Checking preferences for improved agent {agent_idx} vs all existing agents...")
+    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Agent {agent_idx} was just improved against opponent {opponent_idx}")
+    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Current preference_cache keys: {list(preference_cache.keys())[:10]}...")  # Show first 10 keys
+    for existing_idx in range(agent_idx):
+        for question in fixed_questions:
+            cache_key = (agent_idx, existing_idx, question)
+            if cache_key not in preference_cache:
+                preference_queue.append((agent_idx, existing_idx, question))
+                print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Need preference: agent {agent_idx} vs {existing_idx} for question")
+            else:
+                print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Preference already cached: agent {agent_idx} vs {existing_idx} (cache_key: {cache_key})")
     
-    egs_matrix = np.zeros((n, n))
-    missing_pairs = []
+    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Preference queue has {len(preference_queue)} items for agent {agent_idx}")
     
-    # Check all pairs
-    for i in range(n):
-        for j in range(i + 1, n):
-            payoffs = []
-            all_cached = True
+    if preference_queue:
+        # Need to collect preferences
+        if user_mode == "interactive":
+            state["preference_collection_queue"] = preference_queue
+            state["phase"] = "waiting_feedback"
+            print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Setting up preference collection for agent {agent_idx}")
+            st.rerun()
+            return
+        else:
+            # Simulated mode: auto-generate preferences
+            _generate_simulated_preferences_for_agent(state, agent_idx)
+    else:
+        print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] All preferences already cached for agent {agent_idx}, skipping collection")
+    
+    # All preferences collected (or already cached) for the improved agent
+    # IMPORTANT: After improving an agent, we should NOT immediately train it again.
+    # Instead, we should create the next agent (if needed) and collect preferences for it.
+    # The improved agent is done - we only improve each agent once per iteration.
+    
+    # Now create the next agent (if needed) and collect preferences for it
+    if len(state["population"]) < state["n_agents"]:
+        # Create new agent (copy the improved agent as starting point)
+        new_agent_idx = len(state["population"])
+        new_agent = state["population"][agent_idx]  # Copy the improved agent
+        state["population"].append(new_agent)
+        print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Created new agent {new_agent_idx} from improved agent {agent_idx}")
+        
+        # Check if this is the last agent (population size will be n_agents after adding)
+        is_last_agent = (len(state["population"]) >= state["n_agents"])
+        
+        if is_last_agent:
+            # This is the last agent - just collect preferences but don't train it
+            print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Agent {new_agent_idx} is the last agent (population size {len(state['population'])} = target {state['n_agents']}). Collecting preferences but NOT training.")
             
-            for question in fixed_questions:
-                cache_key = (i, j, question)
-                if cache_key in preference_cache:
-                    user_choice = preference_cache[cache_key]
-                    # Convert to payout: "A" (i wins) = 1, "B" (j wins) = -1, "TIE" = 0
-                    if user_choice == "A":
-                        payoffs.append(1)
-                    elif user_choice == "B":
-                        payoffs.append(-1)
-                    else:  # TIE
-                        payoffs.append(0)
+            # Generate answers for the new agent
+            generate_answers_for_agent(state, new_agent_idx)
+            
+            # Collect preferences for the NEW agent vs all existing agents
+            preference_queue = []
+            fixed_questions = state.get("fixed_questions", [])
+            for existing_idx in range(new_agent_idx):
+                for question in fixed_questions:
+                    cache_key = (new_agent_idx, existing_idx, question)
+                    if cache_key not in state.get("preference_cache", {}):
+                        preference_queue.append((new_agent_idx, existing_idx, question))
+            
+            if preference_queue:
+                # Need to collect preferences for the new agent
+                if user_mode == "interactive":
+                    state["preference_collection_queue"] = preference_queue
+                    state["phase"] = "waiting_feedback"
+                    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Setting up preference collection for new agent {new_agent_idx} ({len(preference_queue)} comparisons)")
+                    st.rerun()
+                    return
                 else:
-                    all_cached = False
-                    missing_pairs.append((i, j, question))
+                    # Simulated mode: auto-generate preferences
+                    _generate_simulated_preferences_for_agent(state, new_agent_idx)
             
-            if all_cached and payoffs:
-                avg_payoff = np.mean(payoffs)
-                egs_matrix[i, j] = avg_payoff
-                egs_matrix[j, i] = -avg_payoff
+            # All preferences collected for last agent - we're done!
+            state["phase"] = "complete"
+            print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] All {state['n_agents']} agents created! Last agent {new_agent_idx} preferences collected. Setting phase to 'complete'")
+            print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Calling st.rerun() to trigger EGS computation...")
+            st.rerun()
+            return
+        else:
+            # Not the last agent - collect preferences and train it
+            # Generate answers for the new agent
+            generate_answers_for_agent(state, new_agent_idx)
+            
+            # Collect preferences for the NEW agent vs all existing agents
+            preference_queue = []
+            fixed_questions = state.get("fixed_questions", [])
+            for existing_idx in range(new_agent_idx):
+                for question in fixed_questions:
+                    cache_key = (new_agent_idx, existing_idx, question)
+                    if cache_key not in state.get("preference_cache", {}):
+                        preference_queue.append((new_agent_idx, existing_idx, question))
+            
+            if preference_queue:
+                # Need to collect preferences for the new agent
+                if user_mode == "interactive":
+                    state["preference_collection_queue"] = preference_queue
+                    state["phase"] = "waiting_feedback"
+                    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Setting up preference collection for new agent {new_agent_idx} ({len(preference_queue)} comparisons)")
+                    st.rerun()
+                    return
+                else:
+                    # Simulated mode: auto-generate preferences
+                    _generate_simulated_preferences_for_agent(state, new_agent_idx)
+            
+            # All preferences collected for new agent - now train it
+            _continue_to_next_agent(state)
+    else:
+        # All agents created and trained - we're done!
+        state["phase"] = "complete"
+        print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] All {state['n_agents']} agents created and trained! Setting phase to 'complete'")
+        print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Calling st.rerun() to trigger EGS computation...")
+        st.rerun()
+        return
+
+
+def _continue_to_next_agent(state):
+    """
+    Continue training with next agent.
     
-    # If any preferences are missing, return None
-    if missing_pairs:
-        return None
+    For the FIRST training (agent 1 vs agent 0), we need to run games.
+    For subsequent trainings, we use cached preferences as transcript (no duplicate games).
+    """
+    from datetime import datetime
     
-    return egs_matrix
+    agent_idx = len(state["population"]) - 1
+    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] _continue_to_next_agent: Training agent {agent_idx} (population size: {len(state['population'])}, target: {state['n_agents']})")
+    
+    # Don't check if we have enough agents here - that's handled in _improve_agent_strategy
+    # This function is only called when we need to train the current agent
+    
+    # Check if this is the first training (agent 1 vs agent 0)
+    is_first_training = (agent_idx == 1 and len(state.get("training_history", [])) == 0)
+    
+    if is_first_training:
+        # First training: need to run games (agent 1 vs agent 0)
+        print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] _continue_to_next_agent: First training - running games")
+        state["current_agent_a_idx"] = 1
+        state["current_agent_b_idx"] = 0
+        state["phase"] = "generating"
+        st.rerun()
+    else:
+        # Subsequent trainings: use cached preferences as transcript (no new games!)
+        opponent_idx = select_opponent_psro(state, agent_idx)
+        print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] _continue_to_next_agent: Selected opponent {opponent_idx} for agent {agent_idx}")
+        
+        # Convert cached preferences to transcript format
+        fixed_questions = state.get("fixed_questions", [])
+        preference_cache = state.get("preference_cache", {})
+        answer_cache = state.get("answer_cache", {})
+        
+        transcript = []
+        for question in fixed_questions:
+            cache_key = (agent_idx, opponent_idx, question)
+            if cache_key in preference_cache:
+                user_choice = preference_cache[cache_key]
+                payout = 1 if user_choice == "A" else (-1 if user_choice == "B" else 0)
+                answer_a = answer_cache.get((agent_idx, question), "")
+                answer_b = answer_cache.get((opponent_idx, question), "")
+                if answer_a and answer_b:
+                    transcript.append((question, answer_a, answer_b, payout))
+        
+        if transcript:
+            # Use cached preferences as transcript - no new training games needed!
+            print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] _continue_to_next_agent: Using {len(transcript)} cached preferences as transcript")
+            state["current_transcript"] = transcript
+            state["current_agent_a_idx"] = agent_idx
+            state["current_agent_b_idx"] = opponent_idx
+            state["phase"] = "improving"
+            st.rerun()
+        else:
+            print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] _continue_to_next_agent: ❌ No cached preferences found for agent {agent_idx} vs {opponent_idx}")
+            st.error("⚠️ No cached preferences found. This shouldn't happen.")
+            st.stop()
 
 
 def _generate_simulated_preferences_for_agent(state, agent_idx):
@@ -2683,14 +2630,6 @@ def _generate_simulated_preferences_for_agent(state, agent_idx):
                     preference_cache[cache_key] = user_choice
     
     state["preference_cache"] = preference_cache
-
-
-
-
-# NOTE: _compute_egs_matrix has been moved to llm_competition.py as compute_empirical_gamescape()
-# This function is kept for backward compatibility but should not be used.
-# Use compute_empirical_gamescape() from llm_competition.py instead.
-
 
 def _handle_interactive_egs(state):
     """Handle interactive EGS computation where user provides feedback."""
@@ -2760,6 +2699,8 @@ def _handle_interactive_egs(state):
             egs_matrix[i, j] = avg_payoff
             egs_matrix[j, i] = -avg_payoff
         
+        # Ensure perfect antisymmetry (fix any floating point errors)
+        egs_matrix = (egs_matrix - egs_matrix.T) / 2
         state["egs_matrix"] = egs_matrix
         state["egs_interactive_mode"] = False
         st.success("✅ EGS matrix computed from your feedback!")
