@@ -17,80 +17,172 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from games.disc.disc_game import DiscGame, get_RPS_triangle, demo_disc_game
 from games.disc.disc_game_vis import gif_from_population
 from games.blotto.blotto import BlottoGame, LogitAgent
-from games.blotto.differentiable_lotto import DifferentiableLotto
-from games.blotto.differentiable_lotto_vis import gif_from_matchups
+from games.differentiable_lotto.differentiable_lotto import DifferentiableLotto
+from games.differentiable_lotto.differentiable_lotto_vis import gif_from_matchups
 from games.penneys.penneys import PennysGame, PennysAgent, demo_penneys_game
 from games.penneys.penneys_vis import gif_from_population as penneys_gif_from_population, gif_from_matchups as penneys_gif_from_matchups
 from games.game import run_PSRO_uniform_weaker, run_PSRO_uniform_stronger, run_PSRO_uniform, create_population
 
 
 def run_disc_game_demo(
-    improvement_type: str = "weaker",
+    improvement_type: str = "uniform",
     num_iterations: int = 500,
     learning_rate: float = 0.01,
+    num_agents: int = 3,
     fps: int = 20,
     dpi: int = 120
 ) -> Dict[str, Any]:
     """
-    Run Disc Game demo.
+    Run Disc Game demo with PSRO variants and multiple agents.
     
     Args:
-        improvement_type: "weaker" or "stronger"
+        improvement_type: "uniform", "weaker", or "stronger"
         num_iterations: Number of training iterations
         learning_rate: Learning rate for improvement
+        num_agents: Number of agents in the population
         fps: Frames per second for GIF
         dpi: DPI for visualization
     
     Returns:
-        Dictionary with results
+        Dictionary with results, including GIF, training plot, and EGS visualizations.
     """
     os.makedirs("demos/disc", exist_ok=True)
     
-    improvement_func = run_PSRO_uniform_weaker if improvement_type == "weaker" else run_PSRO_uniform_stronger
-    gif_name = f"demo_PSRO_u_{improvement_type}"
+    improvement_funcs = {
+        "uniform": run_PSRO_uniform,
+        "weaker": run_PSRO_uniform_weaker,
+        "stronger": run_PSRO_uniform_stronger
+    }
+    improvement_func = improvement_funcs.get(improvement_type, run_PSRO_uniform_weaker)
+    plot_name = f"disc_PSRO_{improvement_type}"
     
     game = DiscGame()
-    rock, paper, scissors = [agent.copy() for agent in get_RPS_triangle()]
     
-    # Store initial states
-    initial_rock = rock.copy()
-    initial_paper = paper.copy()
-    initial_scissors = scissors.copy()
+    # Initialize population: for N=3, use RPS triangle; otherwise sample random points on the unit disc
+    if num_agents == 3:
+        population = [agent.copy() for agent in get_RPS_triangle()]
+    else:
+        rng = np.random.RandomState(42)
+        population = []
+        for _ in range(num_agents):
+            # Sample from standard normal and project to unit disc
+            v = rng.normal(size=2)
+            norm = np.linalg.norm(v)
+            if norm > 1e-8:
+                v = v / norm
+            population.append(v)
     
-    agents_history = [[rock.copy(), paper.copy(), scissors.copy()]]
+    import copy
     
-    # Run simulation
-    for iteration in range(num_iterations):
-        population = [rock, paper, scissors]
-        rock = improvement_func(0, population, game)
-        paper = improvement_func(1, population, game)
-        scissors = improvement_func(2, population, game)
-        agents_history.append([rock.copy(), paper.copy(), scissors.copy()])
+    # Track win rates for all agent pairs (values in [0, 1])
+    win_rate_history: Dict[Tuple[int, int], list] = {}
+    for i in range(num_agents):
+        for j in range(i + 1, num_agents):
+            win_rate_history[(i, j)] = []
     
-    # Create GIF
-    gif_path = gif_from_population(
-        np.array(agents_history),
-        path=f"demos/disc/{gif_name}.gif",
-        fps=fps,
-        stride=1,
-        dpi=dpi,
-        unit_circle=True,
-        normalize_difference_vector=0.3
-    )
+    # Track agent history for GIF generation
+    agents_history = [[copy.deepcopy(agent) for agent in population]]
+    
+    # Initial payoffs (raw)
+    initial_payoffs: Dict[Tuple[int, int], float] = {}
+    for i in range(num_agents):
+        for j in range(i + 1, num_agents):
+            payoff = game.play(population[i], population[j])
+            initial_payoffs[(i, j)] = payoff
+    
+    for _ in range(num_iterations):
+        # Improve each agent using the PSRO strategy
+        new_population = []
+        for agent_idx in range(num_agents):
+            new_agent = improvement_func(agent_idx, population, game, learning_rate=learning_rate)
+            new_population.append(new_agent)
+        population = new_population
+        
+        # Store agent states for GIF
+        agents_history.append([copy.deepcopy(agent) for agent in population])
+        
+        # Evaluate "win rates" for all pairs (map payoffs -1/1 to [0, 1])
+        for i_idx in range(num_agents):
+            for j_idx in range(i_idx + 1, num_agents):
+                payoff = game.play(population[i_idx], population[j_idx])
+                win_rate = (payoff + 1.0) / 2.0
+                win_rate_history[(i_idx, j_idx)].append(win_rate)
+    
+    # Final payoffs (raw)
+    final_payoffs: Dict[Tuple[int, int], float] = {}
+    for i in range(num_agents):
+        for j in range(i + 1, num_agents):
+            payoff = game.play(population[i], population[j])
+            final_payoffs[(i, j)] = payoff
+    
+    # Create training plot
+    plt.figure(figsize=(12, 6))
+    for (i, j), values in win_rate_history.items():
+        plt.plot(values, label=f'Agent {i+1} vs Agent {j+1}', alpha=0.7)
+    plt.xlabel('Iteration')
+    plt.ylabel('Win Rate (mapped from payoff)')
+    plt.title(f'Disc Game: Win Rate Over Time ({improvement_type}, {num_agents} agents)')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    
+    plot_path = f"demos/disc/{plot_name}.png"
+    plt.savefig(plot_path)
+    plt.close()
+    
+    # Create population GIF
+    gif_path_pop = None
+    try:
+        gif_path_pop = gif_from_population(
+            np.array(agents_history),
+            path=f"demos/disc/{plot_name}_population.gif",
+            fps=fps,
+            stride=max(1, num_iterations // 200),
+            dpi=dpi,
+            unit_circle=True,
+            normalize_difference_vector=0.3
+        )
+    except Exception as e:
+        print(f"Could not generate population GIF: {e}")
+    
+    # Generate EGS visualizations
+    egs_visualization_paths: Dict[str, str] = {}
+    try:
+        from games.disc.disc_game_vis import plot_all_egs_visualizations
+        
+        egs_visualization_paths = plot_all_egs_visualizations(
+            game,
+            population,
+            output_dir="demos/disc",
+            base_name=f"{plot_name}_egs",
+            n_rounds=1000,
+            dpi=150
+        )
+        if egs_visualization_paths:
+            print(f"Generated {len(egs_visualization_paths)} Disc EGS visualizations: {list(egs_visualization_paths.keys())}")
+        else:
+            print("Warning: No Disc EGS visualizations were generated")
+    except Exception as e:
+        import traceback
+        print(f"Could not generate Disc EGS visualization plots: {e}")
+        traceback.print_exc()
+    
+    # Build final_values dict for backward compatibility (use last win rate)
+    final_values = {}
+    for (i, j), values in win_rate_history.items():
+        if values:
+            final_values[f'agent_{i+1}_vs_{j+1}'] = values[-1]
     
     return {
-        "gif_path": gif_path,
-        "initial_states": {
-            "rock": initial_rock.tolist(),
-            "paper": initial_paper.tolist(),
-            "scissors": initial_scissors.tolist()
-        },
-        "final_states": {
-            "rock": agents_history[-1][0].tolist(),
-            "paper": agents_history[-1][1].tolist(),
-            "scissors": agents_history[-1][2].tolist()
-        },
-        "num_iterations": num_iterations
+        "plot_path": plot_path,
+        "gif_path_population": gif_path_pop,
+        "egs_visualization_paths": egs_visualization_paths,
+        "win_rate_history": win_rate_history,
+        "final_values": final_values,
+        "initial_payoffs": initial_payoffs,
+        "final_payoffs": final_payoffs,
+        "num_iterations": num_iterations,
+        "num_agents": num_agents,
     }
 
 
@@ -225,9 +317,9 @@ def run_blotto_game_demo(
         egs_visualization_paths = plot_all_egs_visualizations(
             game,
             population,
-            output_dir=f"demos/blotto",
+            output_dir="demos/disc",
             base_name=f"{plot_name}_egs",
-            n_rounds=n_rounds,
+            n_rounds=1000,
             dpi=150
         )
         if egs_visualization_paths:
@@ -262,11 +354,13 @@ def run_differentiable_lotto_demo(
     num_iterations: int = 100,
     num_customers: int = 9,
     num_servers: int = 3,
+    num_agents: int = 3,
     optimize_server_positions: bool = True,
     enforce_width_constraint: bool = True,
     width_penalty_lambda: float = 1.0,
     fps: int = 20,
-    dpi: int = 120
+    dpi: int = 120,
+    n_rounds: int = 1000
 ) -> Dict[str, Any]:
     """
     Run Differentiable Lotto demo.
@@ -276,16 +370,18 @@ def run_differentiable_lotto_demo(
         num_iterations: Number of training iterations
         num_customers: Number of customers
         num_servers: Number of servers per agent
+        num_agents: Number of agents in the population
         optimize_server_positions: Whether to optimize server positions
         enforce_width_constraint: Whether to enforce width constraint
         width_penalty_lambda: Penalty coefficient for width constraint
         fps: Frames per second for GIF
         dpi: DPI for visualization
+        n_rounds: Number of rounds per evaluation (for win rate computation)
     
     Returns:
         Dictionary with results
     """
-    os.makedirs("demos/blotto", exist_ok=True)
+    os.makedirs("demos/differentiable_lotto", exist_ok=True)
     
     improvement_funcs = {
         "weaker": run_PSRO_uniform_weaker,
@@ -293,7 +389,7 @@ def run_differentiable_lotto_demo(
         "uniform": run_PSRO_uniform
     }
     improvement_func = improvement_funcs.get(improvement_type, run_PSRO_uniform_weaker)
-    gif_name = f"demo_PSRO_u_{improvement_type}"
+    plot_name = f"diff_lotto_PSRO_{improvement_type}"
     
     game = DifferentiableLotto(
         num_customers=num_customers,
@@ -305,59 +401,149 @@ def run_differentiable_lotto_demo(
         width_penalty_lambda=width_penalty_lambda
     )
     
-    agent1 = game.create_random_agent()
-    agent2 = game.create_random_agent()
-    agent3 = game.create_random_agent()
+    # Create population of N agents
+    import copy
+    population = [game.create_random_agent() for _ in range(num_agents)]
     
-    initial_payoffs = [
-        game.play(agent1, agent2),
-        game.play(agent1, agent3),
-        game.play(agent2, agent3)
-    ]
+    # Track win rates for all agent pairs
+    win_rate_history = {}
+    for i in range(num_agents):
+        for j in range(i + 1, num_agents):
+            win_rate_history[(i, j)] = []
     
-    agents_history = [[agent1, agent2, agent3]]
-    for _ in range(num_iterations):
-        population = [agent1, agent2, agent3]
-        agent1 = improvement_func(0, population, game)
-        agent2 = improvement_func(1, population, game)
-        agent3 = improvement_func(2, population, game)
-        agents_history.append([agent1, agent2, agent3])
+    # Track agent history for GIF generation
+    agents_history = [[copy.deepcopy(agent) for agent in population]]
     
-    final_payoffs = [
-        game.play(agent1, agent2),
-        game.play(agent1, agent3),
-        game.play(agent2, agent3)
-    ]
+    # Compute initial payoffs
+    initial_payoffs = {}
+    for i in range(num_agents):
+        for j in range(i + 1, num_agents):
+            payoff = game.play(population[i], population[j])
+            initial_payoffs[(i, j)] = payoff
     
-    # Create visualization
-    gif_path = None
+    for i in range(num_iterations):
+        # Improve each agent using the PSRO strategy
+        new_population = []
+        for agent_idx in range(num_agents):
+            new_agent = improvement_func(agent_idx, population, game)
+            new_population.append(new_agent)
+        population = new_population
+        
+        # Store agent states for GIF
+        agents_history.append([copy.deepcopy(agent) for agent in population])
+        
+        # Evaluate payoffs for all pairs
+        for i_idx in range(num_agents):
+            for j_idx in range(i_idx + 1, num_agents):
+                payoff = game.play(population[i_idx], population[j_idx])
+                # Convert payoff to win rate (normalize to [0, 1])
+                # For differentiable lotto, payoffs can be negative/positive
+                # We'll use a simple normalization: sigmoid transformation
+                win_rate = 1.0 / (1.0 + np.exp(-payoff / 2.0))
+                win_rate_history[(i_idx, j_idx)].append(win_rate)
+    
+    # Compute final payoffs
+    final_payoffs = {}
+    for i in range(num_agents):
+        for j in range(i + 1, num_agents):
+            payoff = game.play(population[i], population[j])
+            final_payoffs[(i, j)] = payoff
+    
+    # Create training plot
+    plt.figure(figsize=(12, 6))
+    for (i, j), values in win_rate_history.items():
+        plt.plot(values, label=f'Agent {i+1} vs Agent {j+1}', alpha=0.7)
+    plt.xlabel('Iteration')
+    plt.ylabel('Win Rate')
+    plt.title(f'Differentiable Lotto: Win Rate Over Time ({improvement_type}, {num_agents} agents)')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    
+    plot_path = f"demos/differentiable_lotto/{plot_name}.png"
+    plt.savefig(plot_path)
+    plt.close()
+    
+    # Generate GIF visualizations
+    gif_path_pop = None
+    gif_path_match = None
     try:
-        gif_path = gif_from_matchups(
-            game, agents_history,
-            path=f"demos/blotto/{gif_name}.gif",
-            fps=fps, stride=1, dpi=dpi,
+        from games.differentiable_lotto.differentiable_lotto_vis import gif_from_population, gif_from_matchups
+        
+        # GIF showing population evolution
+        gif_path_pop = gif_from_population(
+            game,
+            agents_history,
+            path=f"demos/differentiable_lotto/{plot_name}_population.gif",
+            fps=fps,
+            stride=max(1, num_iterations // 200),  # Limit to ~200 frames
+            dpi=dpi,
+            show_customers=True,
+            show_gradients=True,
+            gradient_scale=0.3
+        )
+        
+        # GIF showing matchups over time
+        gif_path_match = gif_from_matchups(
+            game,
+            agents_history,
+            path=f"demos/differentiable_lotto/{plot_name}_matchups.gif",
+            fps=fps,
+            stride=max(1, num_iterations // 200),
+            dpi=dpi,
             show_customers=True,
             show_gradients=True,
             gradient_scale=0.3
         )
     except Exception as e:
-        print(f"Could not generate visualization: {e}")
+        print(f"Could not generate GIFs: {e}")
+    
+    # Generate EGS visualizations (matrix + PCA, Schur, SVD, t-SNE)
+    egs_visualization_paths = {}
+    try:
+        from games.differentiable_lotto.differentiable_lotto_vis import plot_all_egs_visualizations
+        
+        # Generate all EGS visualizations
+        egs_visualization_paths = plot_all_egs_visualizations(
+            game,
+            population,
+            output_dir=f"demos/differentiable_lotto",
+            base_name=f"{plot_name}_egs",
+            n_rounds=n_rounds,
+            dpi=150
+        )
+        if egs_visualization_paths:
+            print(f"Generated {len(egs_visualization_paths)} EGS visualizations: {list(egs_visualization_paths.keys())}")
+        else:
+            print("Warning: No EGS visualizations were generated")
+    except Exception as e:
+        import traceback
+        print(f"Could not generate EGS visualization plots: {e}")
+        traceback.print_exc()
+    
+    # Build final_values dict for backward compatibility
+    final_values = {}
+    for (i, j), values in win_rate_history.items():
+        if values:
+            final_values[f'agent_{i+1}_vs_{j+1}'] = values[-1]
     
     return {
-        "gif_path": gif_path,
+        "plot_path": plot_path,
+        "gif_path_population": gif_path_pop,
+        "gif_path_matchups": gif_path_match,
+        "egs_visualization_paths": egs_visualization_paths,  # Dict of all EGS visualizations
+        "win_rate_history": win_rate_history,
+        "final_values": final_values,
         "initial_payoffs": initial_payoffs,
         "final_payoffs": final_payoffs,
         "initial_widths": [
-            game._compute_width(agent1[0], agent1[1]),
-            game._compute_width(agent2[0], agent2[1]),
-            game._compute_width(agent3[0], agent3[1])
+            game._compute_width(agent[0], agent[1]) for agent in agents_history[0]
         ],
         "final_widths": [
-            game._compute_width(agents_history[-1][0][0], agents_history[-1][0][1]),
-            game._compute_width(agents_history[-1][1][0], agents_history[-1][1][1]),
-            game._compute_width(agents_history[-1][2][0], agents_history[-1][2][1])
+            game._compute_width(agent[0], agent[1]) for agent in agents_history[-1]
         ],
-        "num_iterations": num_iterations
+        "num_iterations": num_iterations,
+        "num_agents": num_agents
     }
 
 

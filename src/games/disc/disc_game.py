@@ -1,7 +1,7 @@
 import numpy as np
 import os
 from tqdm import trange
-from games.game import Game, contract, run_PSRO_uniform_weaker, run_PSRO_uniform_stronger
+from games.game import Game, contract, run_PSRO_uniform, run_PSRO_uniform_weaker, run_PSRO_uniform_stronger
 from games.disc.disc_game_vis import gif_from_population
 
 """
@@ -97,7 +97,12 @@ def demo_disc_game(improvement_function, gif_file_name="demo_PSRO_disc_game"):
 
 
 if __name__ == "__main__":
+    print("Running Disc Game Demo with PSRO_uniform...")
+    demo_disc_game(run_PSRO_uniform, "demo_PSRO_u_uniform")
+    
+    print("\n" + "=" * 70)
     print("Running Disc Game Demo with PSRO_uniform_weaker...")
+    print("=" * 70 + "\n")
     demo_disc_game(run_PSRO_uniform_weaker, "demo_PSRO_u_weaker")
     
     print("\n" + "=" * 70)

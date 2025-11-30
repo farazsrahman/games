@@ -6,8 +6,9 @@ import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 from PIL import Image
 import io
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 
+from games.egs import EmpiricalGS, visualize_egs_matrix_and_embeddings
 
 def plot_image(
     vs: List[np.ndarray],
@@ -306,6 +307,101 @@ def gif_from_states(
     anim.save(path, writer=writer)
     plt.close(fig)
     return path
+
+
+def plot_all_egs_visualizations(
+    game,
+    agents: List[np.ndarray],
+    output_dir: str,
+    base_name: str = "disc_egs",
+    n_rounds: int = 1000,
+    dpi: int = 150
+) -> Dict[str, str]:
+    """
+    Generate all EGS visualizations: matrix + PCA, Schur, SVD, and t-SNE embeddings
+    for the Disc Game.
+
+    Args:
+        game: DiscGame instance
+        agents: List of 2D agent vectors (points on the disc)
+        output_dir: Directory to save the plots
+        base_name: Base name for output files
+        n_rounds: Unused for DiscGame (kept for API compatibility)
+        dpi: Figure DPI
+
+    Returns:
+        Dictionary mapping embedding method names to file paths
+    """
+    import os
+    from pathlib import Path
+
+    N = len(agents)
+    if N < 2:
+        raise ValueError("Need at least 2 agents for 2D embeddings")
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Compute payoff matrix (values in [-1, 1] from DiscGame.play)
+    payoff_matrix = np.zeros((N, N))
+    for i in range(N):
+        for j in range(N):
+            if i == j:
+                payoff_matrix[i, j] = 0.0  # self-play treated as tie
+            else:
+                payoff = game.play(agents[i], agents[j])
+                payoff_matrix[i, j] = payoff
+
+    # Convert to "win rate" style matrix in [0, 1]
+    winrate_matrix = (payoff_matrix + 1.0) / 2.0
+
+    # Convert to antisymmetric EGS matrix (centered at 0, zero-sum)
+    egs_matrix = winrate_matrix - 0.5  # center at 0
+    egs_matrix = (egs_matrix - egs_matrix.T) / 2  # make antisymmetric
+
+    # Create EmpiricalGS instance
+    try:
+        gamescape = EmpiricalGS(egs_matrix)
+    except AssertionError:
+        # Fallback: create a minimal valid EGS matrix
+        egs_matrix_fallback = np.zeros((N, N))
+        for i in range(N):
+            for j in range(i + 1, N):
+                val = winrate_matrix[i, j] - 0.5
+                egs_matrix_fallback[i, j] = val
+                egs_matrix_fallback[j, i] = -val
+        gamescape = EmpiricalGS(egs_matrix_fallback)
+
+    # Generate all embedding methods
+    methods = ["PCA", "SVD", "schur", "tSNE"]
+    output_paths: Dict[str, str] = {}
+
+    for method in methods:
+        try:
+            # Get embeddings based on method
+            if method.lower() == "pca":
+                coords_2d = gamescape.PCA_embeddings()
+            elif method.lower() == "svd":
+                coords_2d = gamescape.SVD_embeddings()
+            elif method.lower() == "schur":
+                coords_2d = gamescape.schur_embeddings()
+            elif method.lower() == "tsne":
+                coords_2d = gamescape.tSNE_embeddings()
+            else:
+                continue
+
+            # Create output path (use absolute path to avoid issues)
+            output_path = os.path.abspath(os.path.join(output_dir, f"{base_name}_{method.lower()}.png"))
+
+            # Generate visualization
+            visualize_egs_matrix_and_embeddings(gamescape, coords_2d, save_path=output_path, dpi=dpi)
+            output_paths[method] = output_path
+
+        except Exception as e:
+            print(f"Warning: Could not generate {method} visualization: {e}")
+            continue
+
+    return output_paths
+
 
 
 def gif_from_population(

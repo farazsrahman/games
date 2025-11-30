@@ -120,7 +120,7 @@ Generates a training plot in `demos/blotto/blotto_training.png`.
 
 **Differentiable Lotto:**
 ```bash
-python -m games.blotto.differentiable_lotto
+python -m games.differentiable_lotto.differentiable_lotto
 ```
 Generates GIF visualizations showing agent evolution over time.
 *Note: Runs 100 iterations and generates GIFs in `demos/blotto/`.*

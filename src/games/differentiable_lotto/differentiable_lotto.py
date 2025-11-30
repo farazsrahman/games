@@ -275,7 +275,7 @@ class DifferentiableLotto(Game):
 if __name__ == "__main__":
     def demo(improvement_function, gif_file_name="demo_PSRO"):
         """Demo function for Differentiable Lotto game."""
-        os.makedirs("demos/blotto", exist_ok=True)
+        os.makedirs("demos/differentiable_lotto", exist_ok=True)
         
         game = DifferentiableLotto(
             num_customers=9, num_servers=3, customer_scale=1.0,
@@ -331,9 +331,9 @@ if __name__ == "__main__":
             print(f"  Agent {i}: p={agent[0]}, width={game._compute_width(agent[0], agent[1]):.4f}")
         
         try:
-            from games.blotto.differentiable_lotto_vis import gif_from_matchups
+            from games.differentiable_lotto.differentiable_lotto_vis import gif_from_matchups
             gif_path = gif_from_matchups(
-                game, agents_history, path=f"demos/blotto/{gif_file_name}.gif",
+                game, agents_history, path=f"demos/differentiable_lotto/{gif_file_name}.gif",
                 fps=20, stride=1, dpi=120, show_customers=True,
                 show_gradients=True, gradient_scale=0.3
             )
@@ -343,6 +343,19 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"\nNote: Could not generate visualization: {e}")
     
+    print("Running Differentiable Lotto Demo with PSRO_uniform...")
+    demo(run_PSRO_uniform, "demo_PSRO_u_uniform")
+    
+    print("\n" + "=" * 70)
+    print("Running Differentiable Lotto Demo with PSRO_uniform_weaker...")
+    print("=" * 70 + "\n")
     demo(run_PSRO_uniform_weaker, "demo_PSRO_u_weaker")
-    print("\n" + "=" * 70 + "\n")
+    
+    print("\n" + "=" * 70)
+    print("Running Differentiable Lotto Demo with PSRO_uniform_stronger...")
+    print("=" * 70 + "\n")
     demo(run_PSRO_uniform_stronger, "demo_PSRO_u_stronger")
+    
+    print("\n" + "=" * 70)
+    print("All demos completed! Check demos/differentiable_lotto/ for the generated GIFs.")
+    print("=" * 70)

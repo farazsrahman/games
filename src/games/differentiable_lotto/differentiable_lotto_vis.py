@@ -6,7 +6,9 @@ import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 from PIL import Image
 import io
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
+
+from games.egs import EmpiricalGS, visualize_egs_matrix_and_embeddings
 
 
 def plot_colonel_blotto_state(
@@ -544,3 +546,112 @@ def plot_agent_comparison(
     img = Image.open(buf).convert("RGBA").copy()
     buf.close()
     return img
+
+
+def plot_all_egs_visualizations(
+    game,
+    agents: List[Tuple[np.ndarray, np.ndarray]],
+    output_dir: str,
+    base_name: str = "egs",
+    n_rounds: int = 1000,
+    dpi: int = 150
+) -> Dict[str, str]:
+    """
+    Generate all EGS visualizations: matrix + PCA, Schur, SVD, and t-SNE embeddings.
+    
+    Args:
+        game: DifferentiableLotto instance
+        agents: List of agents, each as (p, v) tuple
+        output_dir: Directory to save the plots
+        base_name: Base name for output files
+        n_rounds: Number of rounds per evaluation (not used for differentiable lotto, but kept for compatibility)
+        dpi: Figure DPI
+        
+    Returns:
+        Dictionary mapping embedding method names to file paths
+    """
+    import os
+    from pathlib import Path
+    
+    N = len(agents)
+    if N < 2:
+        raise ValueError("Need at least 2 agents for 2D embeddings")
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Compute payoff matrix
+    # For DifferentiableLotto, play() returns the payoff directly (not win rate)
+    # We need to normalize it to [0, 1] range for EGS compatibility
+    payoff_matrix = np.zeros((N, N))
+    
+    # First pass: compute all payoffs
+    for i in range(N):
+        for j in range(N):
+            if i == j:
+                payoff_matrix[i, j] = 0.5  # Agent vs itself = tie
+            else:
+                payoff = game.play(agents[i], agents[j])
+                payoff_matrix[i, j] = payoff
+    
+    # Normalize payoffs to [0, 1] range using min-max normalization
+    # Get all non-diagonal payoffs
+    mask = ~np.eye(N, dtype=bool)
+    payoffs_raw = payoff_matrix[mask]
+    
+    if len(payoffs_raw) > 0:
+        min_payoff = payoffs_raw.min()
+        max_payoff = payoffs_raw.max()
+        if max_payoff > min_payoff:
+            # Normalize to [0, 1]
+            payoff_matrix[mask] = (payoff_matrix[mask] - min_payoff) / (max_payoff - min_payoff)
+        else:
+            # All payoffs are the same, set non-diagonal to 0.5
+            payoff_matrix[mask] = 0.5
+    
+    # Convert to antisymmetric EGS matrix (centered at 0, zero-sum)
+    egs_matrix = payoff_matrix - 0.5  # Center at 0
+    egs_matrix = (egs_matrix - egs_matrix.T) / 2  # Make antisymmetric
+    
+    # Create EmpiricalGS instance
+    try:
+        gamescape = EmpiricalGS(egs_matrix)
+    except AssertionError:
+        # Fallback: create a minimal valid EGS matrix
+        egs_matrix_fallback = np.zeros((N, N))
+        for i in range(N):
+            for j in range(i + 1, N):
+                val = payoff_matrix[i, j] - 0.5
+                egs_matrix_fallback[i, j] = val
+                egs_matrix_fallback[j, i] = -val
+        gamescape = EmpiricalGS(egs_matrix_fallback)
+    
+    # Generate all embedding methods
+    methods = ["PCA", "SVD", "schur", "tSNE"]
+    output_paths = {}
+    
+    for method in methods:
+        try:
+            # Get embeddings based on method
+            if method.lower() == "pca":
+                coords_2d = gamescape.PCA_embeddings()
+            elif method.lower() == "svd":
+                coords_2d = gamescape.SVD_embeddings()
+            elif method.lower() == "schur":
+                coords_2d = gamescape.schur_embeddings()
+            elif method.lower() == "tsne":
+                coords_2d = gamescape.tSNE_embeddings()
+            else:
+                continue
+            
+            # Create output path (use absolute path to avoid issues)
+            output_path = os.path.abspath(os.path.join(output_dir, f"{base_name}_{method.lower()}.png"))
+            
+            # Generate visualization
+            visualize_egs_matrix_and_embeddings(gamescape, coords_2d, save_path=output_path, dpi=dpi)
+            output_paths[method] = output_path
+            
+        except Exception as e:
+            print(f"Warning: Could not generate {method} visualization: {e}")
+            continue
+    
+    return output_paths

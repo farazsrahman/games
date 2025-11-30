@@ -162,7 +162,17 @@ def render_disc_game_tab():
             max_value=0.1,
             value=0.01,
             step=0.001,
-            format="%.3f"
+            format="%.3f",
+            key="disc_learning_rate"
+        )
+        num_agents = st.slider(
+            "Number of Agents (N)",
+            min_value=2,
+            max_value=20,
+            value=3,
+            step=1,
+            key="disc_num_agents",
+            help="Number of agents in the population"
         )
         
         col_viz1, col_viz2 = st.columns(2)
@@ -173,9 +183,10 @@ def render_disc_game_tab():
     
     with col2:
         st.subheader("Run Simulation")
-        run_button = st.button("Run Demo", type="primary", use_container_width=True)
-        run_all_button = st.button("🔄 Run All Variations", use_container_width=True, 
-                                   help="Run both 'weaker' and 'stronger' variations")
+        run_button = st.button("Run Demo", type="primary", width='stretch', key="disc_run")
+        run_all_button = st.button("🔄 Run All Variations", width='stretch', key="disc_run_all",
+                                   help="Run 'uniform', 'weaker', and 'stronger' variations")
+        st.caption("💡 Run all variations runs all 3 improvement strategies")
         
         if run_button:
             with st.spinner("Running simulation... This may take a while."):
@@ -202,7 +213,7 @@ def render_disc_game_tab():
                     st.error(f"Error running simulation: {str(e)}")
         
         if run_all_button:
-            variations = ["weaker", "stronger"]
+            variations = ["uniform", "weaker", "stronger"]
             progress_bar = st.progress(0)
             status_text = st.empty()
             
@@ -213,6 +224,7 @@ def render_disc_game_tab():
                         improvement_type=var_type,
                         num_iterations=num_iterations,
                         learning_rate=learning_rate,
+                        num_agents=num_agents,
                         fps=fps,
                         dpi=dpi
                     )
@@ -237,34 +249,79 @@ def render_disc_game_tab():
     # Display results
     st.subheader("Results")
     
-    # List available demos
-    demo_files = list_demo_files("disc", ".gif")
-    if demo_files:
-        selected_file = st.selectbox(
-            "Select visualization to display",
-            demo_files,
-            key="disc_file_selector"
-        )
+    # Create tabs for each improvement type
+    tab1, tab2, tab3 = st.tabs(["Uniform", "Weaker", "Stronger"])
+    
+    def display_results_for_type(improvement_type: str):
+        """Display results for a specific improvement type from demos folder."""
+        base_dir = Path("demos/disc")
+        base_name = f"disc_PSRO_{improvement_type}"
         
-        if selected_file:
-            gif_path = Path("demos/disc") / selected_file
-            if gif_path.exists():
-                st.image(str(gif_path))
-                
-                # Download button
-                with open(gif_path, "rb") as f:
+        # Find all files for this improvement type
+        all_files = list(base_dir.glob(f"{base_name}*"))
+        
+        if not all_files:
+            st.info(f"No visualizations available for {improvement_type} strategy. Run a simulation to generate one.")
+            return
+        
+        # Separate GIFs and PNGs
+        gif_files = [f for f in all_files if f.suffix == ".gif"]
+        png_files = [f for f in all_files if f.suffix == ".png"]
+        
+        # Display main plot if available
+        main_plot = base_dir / f"{base_name}.png"
+        if main_plot.exists():
+            st.image(str(main_plot))
+            with open(main_plot, "rb") as f:
+                st.download_button(
+                    label="📥 Download Plot",
+                    data=f.read(),
+                    file_name=main_plot.name,
+                    mime="image/png",
+                    key=f"disc_{improvement_type}_plot_dl"
+                )
+        
+        # Display GIFs
+        if gif_files:
+            for gif_file in gif_files:
+                st.markdown(f"**{gif_file.stem.replace(base_name + '_', '').replace('_', ' ').title()}**")
+                st.image(str(gif_file))
+                with open(gif_file, "rb") as f:
                     st.download_button(
-                        label="📥 Download GIF",
+                        label=f"📥 Download {gif_file.stem.replace(base_name + '_', '').replace('_', ' ').title()}",
                         data=f.read(),
-                        file_name=selected_file,
-                        mime="image/gif"
+                        file_name=gif_file.name,
+                        mime="image/gif",
+                        key=f"disc_{improvement_type}_{gif_file.stem}_dl"
                     )
-                
-                # File info
-                file_size = gif_path.stat().st_size
-                st.caption(f"File size: {format_file_size(file_size)}")
-    else:
-        st.info("No visualizations available. Run a simulation to generate one.")
+        
+        # Display EGS visualizations if available
+        egs_files = [f for f in png_files if "egs" in f.name]
+        if egs_files:
+            st.markdown("#### EGS Visualizations")
+            cols = st.columns(2)
+            for idx, egs_file in enumerate(egs_files):
+                with cols[idx % 2]:
+                    method = egs_file.stem.split("_")[-1].upper()
+                    st.markdown(f"**{method}**")
+                    st.image(str(egs_file))
+                    with open(egs_file, "rb") as f:
+                        st.download_button(
+                            label=f"📥 Download {method}",
+                            data=f.read(),
+                            file_name=egs_file.name,
+                            mime="image/png",
+                            key=f"disc_{improvement_type}_{method}_dl"
+                        )
+    
+    with tab1:
+        display_results_for_type("uniform")
+    
+    with tab2:
+        display_results_for_type("weaker")
+    
+    with tab3:
+        display_results_for_type("stronger")
 
 
 def render_blotto_game_tab():
@@ -334,9 +391,10 @@ def render_blotto_game_tab():
     
     with col2:
         st.subheader("Run Simulation")
-        run_button = st.button("Run Demo", type="primary", use_container_width=True, key="blotto_run")
-        run_all_button = st.button("🔄 Run All Variations", use_container_width=True, key="blotto_run_all",
+        run_button = st.button("Run Demo", type="primary", width='stretch', key="blotto_run")
+        run_all_button = st.button("🔄 Run All Variations", width='stretch', key="blotto_run_all",
                                    help="Run 'uniform', 'weaker', and 'stronger' variations")
+        st.caption("💡 Run all variations runs all 3 improvement strategies")
         
         if run_button:
             with st.spinner("Running simulation... This may take a while."):
@@ -398,220 +456,112 @@ def render_blotto_game_tab():
     # Display results
     st.subheader("Results")
     
-    # Helper function to load results from files for a given improvement type
-    def load_results_from_files(improvement_type: str) -> Dict[str, Any]:
-        """Load visualization files from directory for a given improvement type."""
+    # Create tabs for each improvement type
+    tab1, tab2, tab3 = st.tabs(["Uniform", "Weaker", "Stronger"])
+    
+    def display_results_for_type(improvement_type: str):
+        """Display results for a specific improvement type from demos folder."""
         base_dir = Path("demos/blotto")
         base_name = f"blotto_PSRO_{improvement_type}"
         
-        results = {
-            "egs_visualization_paths": {},
-            "gif_path_population": None,
-            "gif_path_matchups": None,
-            "plot_path": None,
-        }
+        # Find all files for this improvement type
+        all_files = list(base_dir.glob(f"{base_name}*"))
         
-        # Load EGS visualizations
-        methods = ["PCA", "SVD", "schur", "tSNE"]
-        for method in methods:
-            egs_path = base_dir / f"{base_name}_egs_{method.lower()}.png"
-            if egs_path.exists():
-                results["egs_visualization_paths"][method] = str(egs_path.absolute())
-        
-        # Load GIFs
-        pop_gif = base_dir / f"{base_name}_population.gif"
-        if pop_gif.exists():
-            results["gif_path_population"] = str(pop_gif.absolute())
-        
-        match_gif = base_dir / f"{base_name}_matchups.gif"
-        if match_gif.exists():
-            results["gif_path_matchups"] = str(match_gif.absolute())
-        
-        # Load training plot
-        training_plot = base_dir / f"{base_name}.png"
-        if training_plot.exists():
-            results["plot_path"] = str(training_plot.absolute())
-        
-        return results
-    
-    # Helper function to display results for a given improvement type
-    def display_results_for_type(improvement_type: str):
-        """Display all results for a given improvement type."""
-        # First, try to get from session_state (most recent run of this type)
-        result = None
-        runs_of_type = [
-            r for r in st.session_state.runs.values() 
-            if r.get("game") == "blotto" and r.get("type") == improvement_type
-        ]
-        
-        if runs_of_type:
-            latest_run = max(runs_of_type, key=lambda x: x.get("timestamp", 0))
-            if "result" in latest_run:
-                result = latest_run["result"]
-        
-        # If no result in session_state, load from files
-        if not result:
-            result = load_results_from_files(improvement_type)
-        
-        # If still no results, show message
-        if not result or (not result.get("egs_visualization_paths") and 
-                         not result.get("gif_path_population") and 
-                         not result.get("plot_path")):
-            st.info(f"ℹ️ No results available for '{improvement_type}' type. Run a simulation to generate results.")
+        if not all_files:
+            st.info(f"No visualizations available for {improvement_type} strategy. Run a simulation to generate one.")
             return
         
-        # Get paths from result
-        egs_viz_paths = result.get("egs_visualization_paths", {})
-        egs_viz_path = result.get("egs_visualization_path")
-        gamescape_path = result.get("gamescape_matrix_path")
-        embeddings_path = result.get("embeddings_2d_path")
-        gif_pop_path = result.get("gif_path_population")
-        gif_match_path = result.get("gif_path_matchups")
-        training_plot_path = result.get("plot_path")
+        # Separate GIFs and PNGs
+        gif_files = [f for f in all_files if f.suffix == ".gif"]
+        png_files = [f for f in all_files if f.suffix == ".png"]
         
-        # Display all EGS visualizations (Matrix + PCA, Schur, SVD, t-SNE)
-        if egs_viz_paths and len(egs_viz_paths) > 0:
-            st.markdown("#### Empirical Gamescape Visualizations")
-            st.markdown("**Gamescape Matrix & 2D Embeddings (All Methods)**")
-            
-            # Display in a grid: 2 columns
-            methods_order = ["PCA", "SVD", "schur", "tSNE"]
-            cols = st.columns(2)
-            
-            displayed_count = 0
-            for idx, method in enumerate(methods_order):
-                if method in egs_viz_paths and Path(egs_viz_paths[method]).exists():
-                    with cols[idx % 2]:
-                        st.markdown(f"**{method.upper()}**")
-                        st.image(str(egs_viz_paths[method]), use_container_width=True)
-                        with open(egs_viz_paths[method], "rb") as f:
-                            st.download_button(
-                                label=f"📥 Download {method.upper()}",
-                                data=f.read(),
-                                file_name=Path(egs_viz_paths[method]).name,
-                                mime="image/png",
-                                key=f"blotto_{improvement_type}_egs_{method.lower()}_dl"
-                            )
-                    displayed_count += 1
-            
-            if displayed_count == 0:
-                st.warning(f"⚠️ EGS visualizations were generated but files not found. Expected paths: {list(egs_viz_paths.values())}")
-        elif egs_viz_path and Path(egs_viz_path).exists():
-            # Fallback: single combined visualization (backward compatibility)
-            st.markdown("#### Empirical Gamescape Visualization")
-            st.markdown("**Gamescape Matrix & 2D Embeddings**")
-            st.info("ℹ️ This is an older visualization format. Run a new simulation to see all EGS methods (PCA, SVD, Schur, t-SNE).")
-            st.image(str(egs_viz_path), use_container_width=True)
-            with open(egs_viz_path, "rb") as f:
+        # Display main plot if available
+        main_plot = base_dir / f"{base_name}.png"
+        if main_plot.exists():
+            st.image(str(main_plot))
+            with open(main_plot, "rb") as f:
                 st.download_button(
-                    label="📥 Download EGS Visualization",
+                    label="📥 Download Plot",
                     data=f.read(),
-                    file_name=Path(egs_viz_path).name,
+                    file_name=main_plot.name,
                     mime="image/png",
-                    key=f"blotto_{improvement_type}_egs_viz_dl"
+                    key=f"blotto_{improvement_type}_plot_dl"
                 )
-        elif gamescape_path or embeddings_path:
-            # Fallback: show separate visualizations for backward compatibility
-            st.markdown("#### Visualizations")
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                if gamescape_path and Path(gamescape_path).exists():
-                    st.markdown("**Gamescape Matrix**")
-                    st.image(str(gamescape_path), use_container_width=True)
-                    with open(gamescape_path, "rb") as f:
+        
+        # Display GIFs
+        if gif_files:
+            for gif_file in gif_files:
+                gif_type = gif_file.stem.replace(base_name + "_", "").replace("_", " ").title()
+                st.markdown(f"#### {gif_type}")
+                with open(gif_file, "rb") as f:
+                    gif_bytes = f.read()
+                    gif_data = base64.b64encode(gif_bytes).decode()
+                
+                st.markdown(
+                    f'<img src="data:image/gif;base64,{gif_data}" style="max-width: 100%; height: auto;" />',
+                    unsafe_allow_html=True
+                )
+                st.download_button(
+                    label=f"📥 Download {gif_type}",
+                    data=gif_bytes,
+                    file_name=gif_file.name,
+                    mime="image/gif",
+                    key=f"blotto_{improvement_type}_{gif_file.stem}_dl"
+                )
+        
+        # Display EGS visualizations if available
+        egs_files = [f for f in png_files if "egs" in f.name]
+        if egs_files:
+            st.markdown("#### EGS Visualizations")
+            cols = st.columns(2)
+            for idx, egs_file in enumerate(egs_files):
+                with cols[idx % 2]:
+                    method = egs_file.stem.split("_")[-1].upper()
+                    st.markdown(f"**{method}**")
+                    st.image(str(egs_file), width='stretch')
+                    with open(egs_file, "rb") as f:
                         st.download_button(
-                            label="📥 Download",
+                            label=f"📥 Download {method}",
                             data=f.read(),
-                            file_name=Path(gamescape_path).name,
+                            file_name=egs_file.name,
                             mime="image/png",
-                            key=f"blotto_{improvement_type}_gamescape_dl"
+                            key=f"blotto_{improvement_type}_{method}_dl"
                         )
-                else:
-                    st.info("Gamescape matrix not available")
-            
-            with col2:
-                if embeddings_path and Path(embeddings_path).exists():
-                    st.markdown("**2D Policy Embeddings**")
-                    st.image(str(embeddings_path), use_container_width=True)
-                    with open(embeddings_path, "rb") as f:
-                        st.download_button(
-                            label="📥 Download",
-                            data=f.read(),
-                            file_name=Path(embeddings_path).name,
-                            mime="image/png",
-                            key=f"blotto_{improvement_type}_embeddings_dl"
-                        )
-                else:
-                    st.info("2D embeddings not available")
         
-        # Population GIF
-        if gif_pop_path and Path(gif_pop_path).exists():
-            st.markdown("#### Population Evolution (Allocations & Entropy)")
-            with open(gif_pop_path, "rb") as f:
-                gif_bytes = f.read()
-                gif_data = base64.b64encode(gif_bytes).decode()
+        # Display gamescape matrix and embeddings if available (for uniform)
+        if improvement_type == "uniform":
+            gamescape_path = base_dir / "blotto_PSRO_uniform_gamescape_matrix.png"
+            embeddings_path = base_dir / "blotto_PSRO_uniform_2d_embeddings.png"
             
-            st.markdown(
-                f'<img src="data:image/gif;base64,{gif_data}" style="max-width: 100%; height: auto;" />',
-                unsafe_allow_html=True
-            )
-            st.download_button(
-                label="📥 Download Population GIF",
-                data=gif_bytes,
-                file_name=Path(gif_pop_path).name,
-                mime="image/gif",
-                key=f"blotto_{improvement_type}_pop_gif_dl"
-            )
-        
-        # Matchups GIF
-        if gif_match_path and Path(gif_match_path).exists():
-            st.markdown("#### Matchups Evolution (Win Rates)")
-            with open(gif_match_path, "rb") as f:
-                gif_bytes = f.read()
-                gif_data = base64.b64encode(gif_bytes).decode()
-            
-            st.markdown(
-                f'<img src="data:image/gif;base64,{gif_data}" style="max-width: 100%; height: auto;" />',
-                unsafe_allow_html=True
-            )
-            st.download_button(
-                label="📥 Download Matchups GIF",
-                data=gif_bytes,
-                file_name=Path(gif_match_path).name,
-                mime="image/gif",
-                key=f"blotto_{improvement_type}_match_gif_dl"
-            )
-        
-        # Training plot
-        if training_plot_path and Path(training_plot_path).exists():
-            with st.expander("📈 Training Progress Plot", expanded=False):
-                st.image(str(training_plot_path), use_container_width=True)
-                with open(training_plot_path, "rb") as f:
-                    st.download_button(
-                        label="📥 Download Training Plot",
-                        data=f.read(),
-                        file_name=Path(training_plot_path).name,
-                        mime="image/png",
-                        key=f"blotto_{improvement_type}_training_dl"
-                    )
-        
-        # Final statistics if available
-        if "final_values" in result:
-            st.markdown("---")
-            st.markdown("#### Final Statistics")
-            final_vals = result["final_values"]
-            num_agents_display = result.get("num_agents", 3)
-            
-            num_cols = min(3, len(final_vals))
-            cols = st.columns(num_cols)
-            for idx, (key, value) in enumerate(final_vals.items()):
-                with cols[idx % num_cols]:
-                    display_key = key.replace('agent_', 'Agent ').replace('_vs_', ' vs ')
-                    st.metric(display_key, f"{value:.4f}")
-    
-    # Create tabs for each improvement type
-    tab1, tab2, tab3 = st.tabs(["Uniform", "Weaker", "Stronger"])
+            if gamescape_path.exists() or embeddings_path.exists():
+                st.markdown("#### Additional Visualizations")
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    if gamescape_path.exists():
+                        st.markdown("**Gamescape Matrix**")
+                        st.image(str(gamescape_path), width='stretch')
+                        with open(gamescape_path, "rb") as f:
+                            st.download_button(
+                                label="📥 Download Gamescape Matrix",
+                                data=f.read(),
+                                file_name=gamescape_path.name,
+                                mime="image/png",
+                                key=f"blotto_{improvement_type}_gamescape_dl"
+                            )
+                
+                with col2:
+                    if embeddings_path.exists():
+                        st.markdown("**2D Policy Embeddings**")
+                        st.image(str(embeddings_path), width='stretch')
+                        with open(embeddings_path, "rb") as f:
+                            st.download_button(
+                                label="📥 Download 2D Embeddings",
+                                data=f.read(),
+                                file_name=embeddings_path.name,
+                                mime="image/png",
+                                key=f"blotto_{improvement_type}_embeddings_dl"
+                            )
     
     with tab1:
         display_results_for_type("uniform")
@@ -664,6 +614,24 @@ def render_differentiable_lotto_tab():
             step=1,
             key="diff_lotto_servers"
         )
+        num_agents = st.slider(
+            "Number of Agents (N)",
+            min_value=2,
+            max_value=10,
+            value=3,
+            step=1,
+            key="diff_lotto_num_agents",
+            help="Number of agents in the population"
+        )
+        n_rounds = st.slider(
+            "Evaluation Rounds",
+            min_value=100,
+            max_value=2000,
+            value=1000,
+            step=100,
+            key="diff_lotto_n_rounds",
+            help="Number of rounds for win rate evaluation"
+        )
         
         st.markdown("---")
         st.subheader("Advanced Options")
@@ -697,9 +665,10 @@ def render_differentiable_lotto_tab():
     
     with col2:
         st.subheader("Run Simulation")
-        run_button = st.button("Run Demo", type="primary", use_container_width=True, key="diff_lotto_run")
-        run_all_button = st.button("🔄 Run All Variations", use_container_width=True, key="diff_lotto_run_all",
-                                   help="Run 'weaker', 'stronger', and 'uniform' variations")
+        run_button = st.button("Run Demo", type="primary", width='stretch', key="diff_lotto_run")
+        run_all_button = st.button("🔄 Run All Variations", width='stretch', key="diff_lotto_run_all",
+                                   help="Run 'uniform', 'weaker', and 'stronger' variations")
+        st.caption("💡 Run all variations runs all 3 improvement strategies")
         
         if run_button:
             with st.spinner("Running simulation... This may take a while."):
@@ -729,7 +698,7 @@ def render_differentiable_lotto_tab():
                     st.error(f"Error running simulation: {str(e)}")
         
         if run_all_button:
-            variations = ["weaker", "stronger", "uniform"]
+            variations = ["uniform", "weaker", "stronger"]
             progress_bar = st.progress(0)
             status_text = st.empty()
             
@@ -741,11 +710,13 @@ def render_differentiable_lotto_tab():
                         num_iterations=num_iterations,
                         num_customers=num_customers,
                         num_servers=num_servers,
+                        num_agents=num_agents,
                         optimize_server_positions=optimize_server_positions,
                         enforce_width_constraint=enforce_width_constraint,
                         width_penalty_lambda=width_penalty_lambda if enforce_width_constraint else 0.0,
                         fps=fps,
-                        dpi=dpi
+                        dpi=dpi,
+                        n_rounds=n_rounds
                     )
                     
                     run_id = f"diff_lotto_{var_type}_{int(time.time())}"
@@ -767,51 +738,79 @@ def render_differentiable_lotto_tab():
     # Display results
     st.subheader("Results")
     
-    # List available demos
-    demo_files = list_demo_files("blotto", ".gif")
-    diff_lotto_files = [f for f in demo_files if "demo_PSRO" in f]
+    # Create tabs for each improvement type
+    tab1, tab2, tab3 = st.tabs(["Uniform", "Weaker", "Stronger"])
     
-    if diff_lotto_files:
-        selected_file = st.selectbox(
-            "Select visualization to display",
-            diff_lotto_files,
-            key="diff_lotto_file_selector"
-        )
+    def display_results_for_type(improvement_type: str):
+        """Display results for a specific improvement type from demos folder."""
+        base_dir = Path("demos/differentiable_lotto")
+        base_name = f"diff_lotto_PSRO_{improvement_type}"
         
-        if selected_file:
-            gif_path = Path("demos/blotto") / selected_file
-            if gif_path.exists():
-                st.image(str(gif_path))
-                
-                with open(gif_path, "rb") as f:
+        # Find all files for this improvement type
+        all_files = list(base_dir.glob(f"{base_name}*"))
+        
+        if not all_files:
+            st.info(f"No visualizations available for {improvement_type} strategy. Run a simulation to generate one.")
+            return
+        
+        # Separate GIFs and PNGs
+        gif_files = [f for f in all_files if f.suffix == ".gif"]
+        png_files = [f for f in all_files if f.suffix == ".png"]
+        
+        # Display main plot if available
+        main_plot = base_dir / f"{base_name}.png"
+        if main_plot.exists():
+            st.image(str(main_plot))
+            with open(main_plot, "rb") as f:
+                st.download_button(
+                    label="📥 Download Plot",
+                    data=f.read(),
+                    file_name=main_plot.name,
+                    mime="image/png",
+                    key=f"diff_lotto_{improvement_type}_plot_dl"
+                )
+        
+        # Display GIFs
+        if gif_files:
+            for gif_file in gif_files:
+                st.markdown(f"**{gif_file.stem.replace(base_name + '_', '').replace('_', ' ').title()}**")
+                st.image(str(gif_file))
+                with open(gif_file, "rb") as f:
                     st.download_button(
-                        label="📥 Download GIF",
+                        label=f"📥 Download {gif_file.stem.replace(base_name + '_', '').replace('_', ' ').title()}",
                         data=f.read(),
-                        file_name=selected_file,
+                        file_name=gif_file.name,
                         mime="image/gif",
-                        key="diff_lotto_download"
+                        key=f"diff_lotto_{improvement_type}_{gif_file.stem}_dl"
                     )
-                
-                file_size = gif_path.stat().st_size
-                st.caption(f"File size: {format_file_size(file_size)}")
-                
-                # Show statistics if available
-                if "differentiable_lotto" in [r["game"] for r in st.session_state.runs.values()]:
-                    latest_run = max(
-                        [r for r in st.session_state.runs.values() if r["game"] == "differentiable_lotto"],
-                        key=lambda x: x["timestamp"]
-                    )
-                    if "result" in latest_run:
-                        res = latest_run["result"]
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("Initial Payoff (1v2)", f"{res['initial_payoffs'][0]:.4f}")
-                        with col2:
-                            st.metric("Initial Payoff (1v3)", f"{res['initial_payoffs'][1]:.4f}")
-                        with col3:
-                            st.metric("Initial Payoff (2v3)", f"{res['initial_payoffs'][2]:.4f}")
-    else:
-        st.info("No visualizations available. Run a simulation to generate one.")
+        
+        # Display EGS visualizations if available
+        egs_files = [f for f in png_files if "egs" in f.name]
+        if egs_files:
+            st.markdown("#### EGS Visualizations")
+            cols = st.columns(2)
+            for idx, egs_file in enumerate(egs_files):
+                with cols[idx % 2]:
+                    method = egs_file.stem.split("_")[-1].upper()
+                    st.markdown(f"**{method}**")
+                    st.image(str(egs_file))
+                    with open(egs_file, "rb") as f:
+                        st.download_button(
+                            label=f"📥 Download {method}",
+                            data=f.read(),
+                            file_name=egs_file.name,
+                            mime="image/png",
+                            key=f"diff_lotto_{improvement_type}_{method}_dl"
+                        )
+    
+    with tab1:
+        display_results_for_type("uniform")
+    
+    with tab2:
+        display_results_for_type("weaker")
+    
+    with tab3:
+        display_results_for_type("stronger")
 
 
 def render_penneys_game_tab():
