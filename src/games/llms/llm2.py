@@ -8,12 +8,13 @@ Usage:
 """
 import os
 from tqdm import trange
+from typing import List, Optional, Tuple
 # ---- Provider selection ----
 
 from openai import OpenAI
 oai_client = OpenAI()
 OPT_MODEL_NAME = os.environ.get("OPENAI_MODEL", "gpt-5.1")
-MAX_TOKENS = int(os.environ.get("OPENAI_MAX_TOKENS", "16"))
+MAX_OPT_TOKENS = int(os.environ.get("MAX_OPT_TOKENS", "512") )
 
 from groq import Groq
 groq_client = Groq()
@@ -42,58 +43,63 @@ OUTPUT RULES (CRITICAL):
 - No explanations, no reasoning, no markdown, no preamble, no quotes.
 """.strip()
 
-def call_model(user_content: str) -> str:
+def call_model(user_content: str, *, max_attempts: int = 5, base_delay: float = 1.0, max_delay: float = 30.0) -> str:
     """
     Call the selected LLM (OpenAI or Groq) and return the raw move string.
+    Retries up to max_attempts times on failure, with exponential backoff.
     """
-    resp = groq_client.chat.completions.create(
-        model=AGENT_MODEL_NAME,
-        max_tokens=MAX_TOKENS,
-        temperature=1.0,
-        messages=[
-            {"role": "system", "content": AGENT_SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-    )
-    return resp.choices[0].message.content.strip()
+    import time
+
+    last_exception = None
+    for attempt in range(max_attempts):
+        try:
+            resp = groq_client.chat.completions.create(
+                model=AGENT_MODEL_NAME,
+                max_tokens=MAX_TOKENS,
+                temperature=1.0,
+                messages=[
+                    {"role": "system", "content": AGENT_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_content},
+                ],
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception as e:
+            last_exception = e
+            print(f"[call_model retry]: Attempt {attempt + 1} of {max_attempts} failed with error: {e}")
+            if attempt < max_attempts - 1:
+                delay = min(base_delay * (2 ** attempt), max_delay)
+                print(f"Waiting {delay:.2f} seconds before retrying...")
+                time.sleep(delay)
+            else:
+                print(f"ERROR in call_model: All {max_attempts} attempts failed. Last error: {e}")
+                raise e
+    raise last_exception
 
 OPT_SYSTEM_PROMPT = """
-You are about to recieve the transcript of a two player game which includes
-a GAME-PROMPT, two STRATEGY-PROMPTs and a TRANSCRIPT in the different rounds of the game. 
+You are about to receive a transcript of a two-player game which includes the following information:
 
-The GAME-PROMPT provided the players instructions on how the game is to be played
-Each agent will have a STRATEGY-PROMPT. The STRATEGY-PROMPT contains instructions 
-that each agent MUST follow when playing the game. 
+- GAME-PROMPT: The instructions for how the game is played.
+- STRATEGY-PROMPT: The description that specifies how Player 1 is instructed to play.
+- TRANSCRIPTS: The outcomes of one or more rounds between Player 1 and their opponent.
 
-The TRANSCRIPT will provide information about how the players perform against eachother.
-The format of the TRANSCRIPT will look like ('<player1-action>', '<player2-action>', 'payoff')
-where positive payoff indicates player1 wins negative indicates player 2 wins and vice versa.
+You will NOT receive any information about Player 2's strategy prompt or instructions.
 
-You are third-party optimizer for the first player and must reason through
-the transcript of the game, indentify weaknessses in the player's actions 
-and update the STRATEGY-PROMPT of player 1 to increase the probability 
-of beating player 2.
+The TRANSCRIPTS will provide information about how Player 1 performs against their opponent. The format of each transcript entry is ('<player1-action>', '<player2-action>', 'payoff'), where a positive payoff means Player 1 wins, and a negative payoff means Player 2 wins.
 
-To do this, first create a reasoning summary about the opposing player's actions.
-Then devise how you can exploit this strategy to perform strictly better than them.
-The strategy need not generalize to all agents, but it should perform better against this one.
+Your job as a third-party optimizer is to improve Player 1's STRATEGY-PROMPT by examining the transcript. Identify Player 1's weaknesses and suggest an updated STRATEGY-PROMPT that increases their chance of winning against the opponents seen in the transcript rounds.
+
+First, consider how Player 1 performed in the games; think carefully about how you would update Player 1's strategy without changing it too much—try to preserve strengths that are not challenged in the transcript. Do not think generally about all possible opponents; only consider the specific rounds present in the transcripts.
 
 OUTPUT RULES (CRITICAL):
-- Use reasoning to carefully consider what the best new strategy_prompt is but do NOT include reasoning in the response
-- Return a string that has the following format \"STRATEGY-PROMPT: <strategy-description-here>\"
+- Use reasoning to carefully determine the best possible new strategy prompt, but DO NOT include any reasoning or summary in your response.
+- Return ONLY a string of the following format: "STRATEGY-PROMPT: <strategy-description-here>"
 """.strip()
 
-def get_opt_prompt(u_prompt: str, v_prompt: str, transcript: str, game_prompt: str) -> str:
-    opt_prompt = f"""
-    {game_prompt}\n\n
-
-    Player 1 {u_prompt}\n\n
-
-    Player 2 {v_prompt}\n\n
-
-    Transcript {transcript}\n\n
-    """.strip()
-
+def get_opt_prompt(u_prompt: str, transcripts: str, game_prompt: str) -> str:
+    opt_prompt = f"{game_prompt}\n\nPlayer 1 {u_prompt}\n\nTRANSCRIPTS\n\n"
+    for idx in range(len(transcripts)):
+        opt_prompt += f"GAME {idx}:\n{transcripts[idx]}\n\n"
+    print(opt_prompt)
     return opt_prompt
 
 # ---- RPS Specific Prompts + Functions ----
@@ -110,6 +116,9 @@ After both players choose their item, they are revealed and the result of the ga
   - rock beats scissors
   - scissors beats paper
   - paper beats rock
+
+STRATEGY PROMPT RULES:
+- Strategies do not see any previous game transcripts so they should not refer to previous transcripts. 
 
 OUTPUT RULES (CRITICAL):
 - When it is time to choose your move, you MUST respond with exactly ONE character:
@@ -131,6 +140,15 @@ paper_scissors_prompt = """
 STRATEGY-PROMPT: Play paper or scissors with equal probability.
 """.strip()
 
+random_prompt = """
+STRATEGY-PROMPT: Choose randomly and uniformly between rock, paper, and scissors each round.
+""".strip()
+
+scissors_rock_prompt = """
+STRATEGY-PROMPT: Play scissors or rock with equal probability.
+""".strip()
+
+example_population = [rock_prompt, paper_scissors_prompt, random_prompt, scissors_rock_prompt]
 
 # ---- Game evaluation ----
 
@@ -169,40 +187,52 @@ def evaluate(u_prompt: str, v_prompt: str, game_prompt: str):
 
     return move_u, move_v, payout
 
-def improve(u_prompt: str, v_prompt: str, n_games: int, game_prompt: str):
+def improve(u_prompt: str, transcripts: List[str], game_prompt: str):
     """
     Evaluate two agents in a game n_games times, then collect information and have a big reasoning LLM
     upgrate the prompt.
     """
 
-    transcript = []
-    for _ in trange(n_games):
-        transcript.append(evaluate(u_prompt, v_prompt, game_prompt))
-
-    opt_prompt=get_opt_prompt(u_prompt, v_prompt, transcript, game_prompt)
+    opt_prompt=get_opt_prompt(u_prompt, transcripts, game_prompt)
 
     resp = oai_client.chat.completions.create(
         model=OPT_MODEL_NAME,
-        # max_tokens=,
+        max_completion_tokens=MAX_OPT_TOKENS,
         temperature=1.0,
         messages=[
             {"role": "system", "content": OPT_SYSTEM_PROMPT},
             {"role": "user", "content": opt_prompt},
         ],
     )
-    return resp.choices[0].message.content.strip(), transcript, sum([t[2]for t in transcript]) / len(transcript)
+    return resp.choices[0].message.content.strip()
 
 class LLMRockPaperScissors(Game):
 
-    def play(self, u, v):
-        _, _, value = evaluate(u, v, rps_prompt)
-        return value
+    def play(self, u, v, *, return_transcript=False):
+        """
+        returns transcript if return_transcript=True else just returns value of game
+        """
+        transcript = evaluate(u, v, rps_prompt)        
+        return transcript if return_transcript else transcript[2]
 
     def improve(self, u, v, *, n_games=10):
         print("U:", u, "\t, V:", v)
-        u_new, _, _ = improve(u, v, n_games, rps_prompt)
+
+        transcripts = []
+        for _ in trange(n_games):
+            transcripts.append(evaluate(u, v, rps_prompt))
+
+        u_new = improve(u, transcripts, rps_prompt)
+        print("U_NEW:", u_new)
+
+        return u_new
+
+    def improve_from_transcripts(self, u, transcripts):
+        print("U:", u, "\t, TRANSCRIPTS:", transcripts)
+        u_new = improve(u, transcripts, rps_prompt)
         print("U_NEW:", u_new)
         return u_new
+
 
 
 def empirical_rps_distribution(player_prompt: str, n_games: int = 100):
