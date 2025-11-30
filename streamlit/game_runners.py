@@ -317,7 +317,7 @@ def run_blotto_game_demo(
         egs_visualization_paths = plot_all_egs_visualizations(
             game,
             population,
-            output_dir="demos/disc",
+            output_dir="demos/blotto",
             base_name=f"{plot_name}_egs",
             n_rounds=1000,
             dpi=150
