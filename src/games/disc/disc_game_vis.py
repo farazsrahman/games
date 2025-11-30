@@ -342,6 +342,8 @@ def plot_all_egs_visualizations(
     os.makedirs(output_dir, exist_ok=True)
 
     # Compute payoff matrix (values in [-1, 1] from DiscGame.play)
+    # Note: DiscGame.play returns u^T A v > 0 ? 1 : -1, which is already antisymmetric
+    # since u^T A v = -v^T A u (A is antisymmetric)
     payoff_matrix = np.zeros((N, N))
     for i in range(N):
         for j in range(N):
@@ -351,25 +353,31 @@ def plot_all_egs_visualizations(
                 payoff = game.play(agents[i], agents[j])
                 payoff_matrix[i, j] = payoff
 
-    # Convert to "win rate" style matrix in [0, 1]
+    # Convert to "win rate" style matrix in [0, 1] for consistency with other games
     winrate_matrix = (payoff_matrix + 1.0) / 2.0
 
     # Convert to antisymmetric EGS matrix (centered at 0, zero-sum)
-    egs_matrix = winrate_matrix - 0.5  # center at 0
-    egs_matrix = (egs_matrix - egs_matrix.T) / 2  # make antisymmetric
+    # Since winrate[i,j] + winrate[j,i] = 1, we have:
+    # egs[i,j] = winrate[i,j] - 0.5, which gives egs[i,j] + egs[j,i] = 0 (antisymmetric)
+    # So we can directly construct the antisymmetric matrix
+    egs_matrix = np.zeros((N, N))
+    for i in range(N):
+        for j in range(i + 1, N):
+            # Convert winrate to centered value: winrate - 0.5 is in [-0.5, 0.5]
+            val = winrate_matrix[i, j] - 0.5
+            egs_matrix[i, j] = val
+            egs_matrix[j, i] = -val  # Ensure antisymmetry
 
     # Create EmpiricalGS instance
     try:
         gamescape = EmpiricalGS(egs_matrix)
-    except AssertionError:
-        # Fallback: create a minimal valid EGS matrix
-        egs_matrix_fallback = np.zeros((N, N))
-        for i in range(N):
-            for j in range(i + 1, N):
-                val = winrate_matrix[i, j] - 0.5
-                egs_matrix_fallback[i, j] = val
-                egs_matrix_fallback[j, i] = -val
-        gamescape = EmpiricalGS(egs_matrix_fallback)
+    except AssertionError as e:
+        # If assertion fails, print debug info and re-raise
+        print(f"Warning: EGS matrix assertion failed: {e}")
+        print(f"Matrix shape: {egs_matrix.shape}")
+        print(f"Is antisymmetric? {np.allclose(egs_matrix, -egs_matrix.T)}")
+        print(f"Matrix:\n{egs_matrix}")
+        raise
 
     # Generate all embedding methods
     methods = ["PCA", "SVD", "schur", "tSNE"]

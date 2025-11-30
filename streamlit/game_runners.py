@@ -553,11 +553,12 @@ def run_penneys_game_demo(
     sequence_length: int = 3,
     n_rounds: int = 500,
     learning_rate: float = 0.1,
+    num_agents: int = 3,
     fps: int = 20,
     dpi: int = 120
 ) -> Dict[str, Any]:
     """
-    Run Penney's Game demo.
+    Run Penney's Game demo with PSRO variants.
     
     Args:
         improvement_type: "weaker", "stronger", or "uniform"
@@ -565,6 +566,7 @@ def run_penneys_game_demo(
         sequence_length: Length of H/T sequences (default 3)
         n_rounds: Number of rounds for evaluation
         learning_rate: Learning rate for improvement
+        num_agents: Number of agents in the population (default: 3)
         fps: Frames per second for GIF
         dpi: DPI for visualization
     
@@ -581,56 +583,65 @@ def run_penneys_game_demo(
     improvement_func = improvement_funcs.get(improvement_type, run_PSRO_uniform)
     plot_name = f"penneys_PSRO_{improvement_type}"
     
+    import copy
+    
     game = PennysGame(sequence_length=sequence_length)
     
-    # Create a population of 3 agents
-    agent_1 = PennysAgent(sequence_length=sequence_length, seed=42)
-    agent_2 = PennysAgent(sequence_length=sequence_length, seed=43)
-    agent_3 = PennysAgent(sequence_length=sequence_length, seed=44)
+    # Create population of N agents using create_population helper
+    def agent_factory(**kwargs):
+        seq_len = kwargs.get('sequence_length', sequence_length)
+        seed = kwargs.get('seed', None)
+        agent = PennysAgent(sequence_length=seq_len, seed=seed)
+        # Initialize with random distribution
+        if seed is not None:
+            rng = np.random.RandomState(seed)
+        else:
+            rng = np.random.RandomState()
+        agent.logits = rng.randn(2 ** seq_len)
+        return agent
     
-    # Initialize with slightly different distributions
-    agent_1.logits = np.random.RandomState(42).randn(2 ** sequence_length)
-    agent_2.logits = np.random.RandomState(43).randn(2 ** sequence_length)
-    agent_3.logits = np.random.RandomState(44).randn(2 ** sequence_length)
+    population = create_population(
+        game=game,
+        num_agents=num_agents,
+        seed=42,
+        agent_factory=agent_factory,
+        sequence_length=sequence_length
+    )
     
-    # Track win rates
-    values_12 = []
-    values_13 = []
-    values_23 = []
+    # Track win rates for all agent pairs
+    # Store as dict: {(i, j): [values over time]}
+    win_rate_history = {}
+    for i in range(num_agents):
+        for j in range(i + 1, num_agents):
+            win_rate_history[(i, j)] = []
     
-    # Track agent history
-    agents_history = [[agent_1.copy(), agent_2.copy(), agent_3.copy()]]
+    # Track agent history for GIF generation
+    agents_history = [[copy.deepcopy(agent) for agent in population]]
     
-    from tqdm import trange
-    
-    for i in trange(num_iterations, desc="Training iterations"):
-        population = [agent_1, agent_2, agent_3]
+    for i in range(num_iterations):
+        # Improve each agent using the PSRO strategy
+        new_population = []
+        for agent_idx in range(num_agents):
+            new_agent = improvement_func(agent_idx, population, game)
+            new_population.append(new_agent)
+        population = new_population
         
-        # Improve each agent
-        agent_1 = improvement_func(0, population, game)
-        agent_2 = improvement_func(1, population, game)
-        agent_3 = improvement_func(2, population, game)
+        # Store agent states for GIF
+        agents_history.append([copy.deepcopy(agent) for agent in population])
         
-        # Store agent states
-        agents_history.append([agent_1.copy(), agent_2.copy(), agent_3.copy()])
-        
-        # Evaluate win rates
-        val_12 = game.play(agent_1, agent_2, n_rounds=n_rounds)
-        val_13 = game.play(agent_1, agent_3, n_rounds=n_rounds)
-        val_23 = game.play(agent_2, agent_3, n_rounds=n_rounds)
-        
-        values_12.append(val_12)
-        values_13.append(val_13)
-        values_23.append(val_23)
+        # Evaluate win rates for all pairs
+        for i_idx in range(num_agents):
+            for j_idx in range(i_idx + 1, num_agents):
+                val = game.play(population[i_idx], population[j_idx], n_rounds=n_rounds)
+                win_rate_history[(i_idx, j_idx)].append(val)
     
     # Create static plot
     plt.figure(figsize=(12, 6))
-    plt.plot(values_12, label='Agent 1 vs Agent 2', alpha=0.7)
-    plt.plot(values_13, label='Agent 1 vs Agent 3', alpha=0.7)
-    plt.plot(values_23, label='Agent 2 vs Agent 3', alpha=0.7)
+    for (i, j), values in win_rate_history.items():
+        plt.plot(values, label=f'Agent {i+1} vs Agent {j+1}', alpha=0.7)
     plt.xlabel('Iteration')
     plt.ylabel('Win Rate (Agent i)')
-    plt.title(f"Penney's Game: Win Rate Over Time ({improvement_type})")
+    plt.title(f"Penney's Game: Win Rate Over Time ({improvement_type}, {num_agents} agents)")
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.axhline(0, color='gray', linestyle='--', alpha=0.5)
@@ -640,7 +651,7 @@ def run_penneys_game_demo(
     plt.savefig(plot_path)
     plt.close()
     
-    # Generate GIFs
+    # Generate GIF visualizations
     gif_path_pop = None
     gif_path_match = None
     try:
@@ -663,17 +674,46 @@ def run_penneys_game_demo(
             n_rounds=500
         )
     except Exception as e:
-        print(f"Could not generate visualization: {e}")
+        print(f"Could not generate GIFs: {e}")
+    
+    # Generate gamescape matrix and 2D embeddings visualizations
+    # Generate all EGS visualizations (matrix + PCA, Schur, SVD, t-SNE)
+    egs_visualization_paths = {}
+    try:
+        from games.penneys.penneys_vis import plot_all_egs_visualizations
+        
+        # Generate all EGS visualizations
+        egs_visualization_paths = plot_all_egs_visualizations(
+            game,
+            population,
+            output_dir="demos/penneys",
+            base_name=f"{plot_name}_egs",
+            n_rounds=1000,
+            dpi=150
+        )
+        if egs_visualization_paths:
+            print(f"Generated {len(egs_visualization_paths)} Penneys EGS visualizations: {list(egs_visualization_paths.keys())}")
+        else:
+            print("Warning: No Penneys EGS visualizations were generated")
+    except Exception as e:
+        import traceback
+        print(f"Could not generate Penneys EGS visualization plots: {e}")
+        traceback.print_exc()
+    
+    # Build final_values dict for backward compatibility
+    final_values = {}
+    for (i, j), values in win_rate_history.items():
+        if values:
+            final_values[f'agent_{i+1}_vs_{j+1}'] = values[-1]
     
     return {
         "plot_path": plot_path,
         "gif_path_population": gif_path_pop,
         "gif_path_matchups": gif_path_match,
-        "final_values": {
-            "agent_1_vs_2": values_12[-1],
-            "agent_1_vs_3": values_13[-1],
-            "agent_2_vs_3": values_23[-1]
-        },
-        "num_iterations": num_iterations
+        "egs_visualization_paths": egs_visualization_paths,  # Dict of all EGS visualizations
+        "win_rate_history": win_rate_history,
+        "final_values": final_values,
+        "num_iterations": num_iterations,
+        "num_agents": num_agents
     }
 

@@ -144,8 +144,8 @@ def gif_from_population(
         ax1.set_xticklabels(battlefields)
         ax1.legend(loc='upper right')
         ax1.grid(True, alpha=0.3, axis='y')
-        # Set y-axis limit based on budget (with some padding)
-        ax1.set_ylim(0, budget * 1.1)
+        # Set y-axis limit based on budget (with generous padding)
+        ax1.set_ylim(0, budget * 1.2)
         
         # Add value labels on bars
         texts = []
@@ -181,16 +181,17 @@ def gif_from_population(
             ax2.set_title('Policy Diversity Over Time', fontsize=14)
             ax2.legend(loc='upper right')
             ax2.grid(True, alpha=0.3)
+            # Let matplotlib auto-scale axes instead of setting restrictive limits
             if len(idx) > 0:
-                ax2.set_xlim(-0.5, idx[-1] + 0.5)
+                ax2.set_xlim(0, idx[-1] * 1.05 if idx[-1] > 0 else 1)
             if len(entropies) > 0:
                 max_entropy = entropies[:t_range].max() if t_range > 0 else entropies.max()
-                ax2.set_ylim(0, max(max_entropy * 1.1, 1))
+                ax2.set_ylim(0, max(max_entropy * 1.2, 1.1))
             
             artists.extend(lines)
             artists.extend(scatters)
         
-        plt.tight_layout()
+        plt.subplots_adjust(left=0.1, right=0.95, top=0.95, bottom=0.1)
         return artists
     
     # Create animation
@@ -288,11 +289,15 @@ def gif_from_matchups(
         ax.set_title(f'Win Rates Between Agents (Iteration {idx[t]})', fontsize=14)
         ax.legend()
         ax.grid(True, alpha=0.3)
-        ax.set_xlim(0, idx[-1] if len(idx) > 0 else 1)
-        ax.set_ylim(0, 1)
+        # Use more flexible limits
+        if len(idx) > 0 and idx[-1] > 0:
+            ax.set_xlim(-0.05 * idx[-1], idx[-1] * 1.05)
+        else:
+            ax.set_xlim(0, 1)
+        ax.set_ylim(-0.05, 1.05)  # Allow slight overflow for visibility
         ax.axhline(0.5, color='gray', linestyle='--', alpha=0.5, label='Tie')
         
-        plt.tight_layout()
+        plt.subplots_adjust(left=0.1, right=0.95, top=0.95, bottom=0.1)
     
     # Create animation
     num_frames = len(agents_s)
@@ -376,7 +381,7 @@ def plot_gamescape_matrix(
     cbar.set_ticks([-0.5, -0.25, 0, 0.25, 0.5])
     cbar.set_ticklabels(['0.0', '0.25', '0.5', '0.75', '1.0'])
     
-    plt.tight_layout()
+    plt.subplots_adjust(left=0.1, right=0.92, top=0.95, bottom=0.1)
     plt.savefig(output_path, dpi=dpi, bbox_inches='tight')
     plt.close(fig)
     
