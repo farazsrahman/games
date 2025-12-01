@@ -24,21 +24,6 @@ from games.llms.config_llm import (
     OPT_SYSTEM_PROMPT
 )
 
-"""
-#TODO
-simulate user with LLM 
-change up questions to be more realistic 
-
-to properly run PSRO should be comparing each new agent to all previous agents and saving user preferences at each agent training
-so at end for EGS shouldn't need to run all at once, shou.d all already be saved foerm previous pSRO necessary preferences 
-
-try 10 interactive experiment with stronger to see if convex hull diff 
-maybe try with 5 agents first? 
-
-weaker convex hull area should be larger than stronger convex hull area 
-try changing up the questions to be more realistic 
-"""
-
 # ============================================================================
 # DEFAULT QUESTIONS
 # ============================================================================

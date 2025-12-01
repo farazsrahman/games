@@ -89,9 +89,24 @@ def compute_agent_scores(state: Dict[str, Any], agent_i: int, agent_j: int) -> f
     scores = []
     
     for question in fixed_questions:
-        cache_key = (agent_i, agent_j, question)
-        if cache_key in preference_cache:
-            user_choice = preference_cache[cache_key]
+        # Try both (i, j) and (j, i) since cache might have either order
+        cache_key_ij = (agent_i, agent_j, question)
+        cache_key_ji = (agent_j, agent_i, question)
+        
+        user_choice = None
+        if cache_key_ij in preference_cache:
+            user_choice = preference_cache[cache_key_ij]
+        elif cache_key_ji in preference_cache:
+            # If stored as (j, i), need to flip the choice
+            cached_choice = preference_cache[cache_key_ji]
+            if cached_choice == "A":
+                user_choice = "B"  # j wins means i loses
+            elif cached_choice == "B":
+                user_choice = "A"  # j loses means i wins
+            else:
+                user_choice = "TIE"
+        
+        if user_choice is not None:
             if user_choice == "A":  # agent_i wins
                 scores.append(1)
             elif user_choice == "B":  # agent_j wins
