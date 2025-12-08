@@ -243,27 +243,9 @@ def simulate_user_choice_llm(
     Returns:
         "A", "B", or "TIE"
     """
-    from games.llms.config_llm import call_model
+    from games.llms.config_llm import call_model, format_user_preference_prompt
     
-    prompt = f"""{user_persona}
-
-You are evaluating two answers to the following question:
-
-Question: {question}
-
-Answer A:
-{answer_a}
-
-Answer B:
-{answer_b}
-
-Which answer do you prefer? You must respond with exactly one of the following:
-- "A" if you prefer Answer A
-- "B" if you prefer Answer B
-- "TIE" if you have no preference or both answers are equally good
-
-Your response (A, B, or TIE):"""
-    
+    prompt = format_user_preference_prompt(user_persona, question, answer_a, answer_b)
     response = call_model(prompt, call_site)
     response = response.strip().upper()
     
@@ -283,6 +265,74 @@ Your response (A, B, or TIE):"""
         else:
             # Default to TIE if unclear
             return "TIE"
+
+
+def simulate_user_choice_llm_batch(
+    comparisons: List[Tuple[str, str, str, str, str]],
+    user_persona: str = "You are a helpful user evaluating answers to questions.",
+    max_workers: Optional[int] = None
+) -> Dict[Tuple[str, str, str], str]:
+    """
+    Simulate user choices for multiple comparisons in parallel using an LLM.
+    
+    Args:
+        comparisons: List of (answer_a, answer_b, question, call_site, key) tuples
+                     where key is used to identify the result (e.g., (agent_idx, opponent_idx, question))
+        user_persona: Description of the user persona
+        max_workers: Maximum number of parallel threads. If None, uses default.
+    
+    Returns:
+        Dictionary mapping key -> "A", "B", or "TIE"
+    
+    Example:
+        >>> comparisons = [
+        ...     ("Answer 1", "Answer 2", "Question?", "site1", (0, 1, "q1")),
+        ...     ("Answer 3", "Answer 4", "Question?", "site2", (0, 2, "q1")),
+        ... ]
+        >>> results = simulate_user_choice_llm_batch(comparisons)
+        >>> print(results[(0, 1, "q1")])  # "A", "B", or "TIE"
+    """
+    from games.llms.config_llm import call_model_batch, format_user_preference_prompt
+    
+    if not comparisons:
+        return {}
+    
+    # Prepare prompts for batch call
+    batch_prompts = []
+    key_to_call_site = {}  # Map key -> call_site for result mapping
+    
+    for answer_a, answer_b, question, call_site, key in comparisons:
+        prompt = format_user_preference_prompt(user_persona, question, answer_a, answer_b)
+        batch_prompts.append((prompt, call_site))
+        key_to_call_site[call_site] = key
+    
+    # Make parallel calls
+    batch_results = call_model_batch(batch_prompts, max_workers=max_workers, model_type="agent")
+    
+    # Parse responses and map back to keys
+    results = {}
+    for call_site, response in batch_results.items():
+        key = key_to_call_site[call_site]
+        response = response.strip().upper()
+        
+        # Extract A, B, or TIE from response (same logic as simulate_user_choice_llm)
+        if "A" in response and "B" not in response and "TIE" not in response:
+            results[key] = "A"
+        elif "B" in response and "A" not in response and "TIE" not in response:
+            results[key] = "B"
+        elif "TIE" in response:
+            results[key] = "TIE"
+        else:
+            # Fallback: try to parse more carefully
+            if response.startswith("A"):
+                results[key] = "A"
+            elif response.startswith("B"):
+                results[key] = "B"
+            else:
+                # Default to TIE if unclear
+                results[key] = "TIE"
+    
+    return results
 
 # ============================================================================
 # USER EVALUATOR INTERFACE
@@ -386,7 +436,8 @@ def generate_answer(
             return cached_answer
     
     # Generate answer
-    full_prompt = f"{game_prompt}\n\n{strategy}\n\nQuestion: {question}\n\nProvide your answer:"
+    from games.llms.config_llm import format_answer_generation_prompt
+    full_prompt = format_answer_generation_prompt(game_prompt, strategy, question)
     answer = call_model(full_prompt, call_site)  # LLM_CALL (via call_model)
     
     # Cache the answer
@@ -401,11 +452,12 @@ def generate_answers_batch(
     questions: List[str],
     game_prompt: str,
     call_site_prefix: str = "batch_generate",
-    use_cache: bool = True
+    use_cache: bool = True,
+    max_workers: Optional[int] = None
 ) -> Dict[Tuple[int, int], str]:
     """
     Generate answers for all strategy-question pairs in batch.
-    Uses caching to minimize LLM calls.
+    Uses caching to minimize LLM calls and parallelizes LLM API calls.
     
     Args:
         strategies: List of agent strategy prompts
@@ -413,12 +465,18 @@ def generate_answers_batch(
         game_prompt: Game instructions prompt
         call_site_prefix: Prefix for call site tracking
         use_cache: Whether to use answer cache
+        max_workers: Maximum number of parallel threads for LLM calls. If None, uses default.
     
     Returns:
         Dictionary mapping (agent_idx, question_idx) -> answer
     """
+    from games.llms.config_llm import call_model_batch, format_answer_generation_prompt
+    
     results = {}
     cache = get_answer_cache()
+    
+    # First pass: check cache and collect uncached items
+    uncached_prompts = []  # List of (full_prompt, call_site, (agent_idx, question_idx))
     
     for agent_idx, strategy in enumerate(strategies):
         for question_idx, question in enumerate(questions):
@@ -429,10 +487,28 @@ def generate_answers_batch(
                     results[(agent_idx, question_idx)] = cached_answer
                     continue
             
-            # Generate answer
+            # Prepare prompt for parallel call
+            full_prompt = format_answer_generation_prompt(game_prompt, strategy, question)
             call_site = f"{call_site_prefix}_agent_{agent_idx}_q_{question_idx}"
-            answer = generate_answer(strategy, question, game_prompt, call_site, use_cache=False)
-            results[(agent_idx, question_idx)] = answer
+            uncached_prompts.append((full_prompt, call_site, (agent_idx, question_idx)))
+    
+    # If there are uncached items, make parallel LLM calls
+    if uncached_prompts:
+        # Prepare prompts for batch call
+        batch_prompts = [(prompt, call_site) for prompt, call_site, _ in uncached_prompts]
+        
+        # Make parallel calls
+        batch_results = call_model_batch(batch_prompts, max_workers=max_workers, model_type="agent")
+        
+        # Map results back to (agent_idx, question_idx) keys and cache them
+        for full_prompt, call_site, key in uncached_prompts:
+            answer = batch_results.get(call_site, "")
+            results[key] = answer
+            
+            # Cache the answer
+            if use_cache and answer:
+                agent_idx, question_idx = key
+                cache.set(strategies[agent_idx], questions[question_idx], answer)
     
     return results
 
@@ -947,12 +1023,14 @@ def save_experiment_results(
     user_mode = experiment_params.get("user_mode", "unknown")  # 'simulated' or 'interactive'
     n_questions = experiment_params.get("n_questions_per_pair", "unknown")
     
-    # Create descriptive subfolder name
-    subfolder = f"agents_{n_agents}_method_{improvement_method}_mode_{user_mode}_questions_{n_questions}"
+    # Add timestamp to subfolder name to distinguish between runs (even on same day)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Create descriptive subfolder name with timestamp
+    subfolder = f"agents_{n_agents}_method_{improvement_method}_mode_{user_mode}_questions_{n_questions}_{timestamp}"
     experiment_dir = os.path.join(save_dir, subfolder)
     os.makedirs(experiment_dir, exist_ok=True)
     
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_name = f"{prefix}_{timestamp}"
     
     # Save population

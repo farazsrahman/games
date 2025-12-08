@@ -4,7 +4,7 @@ from math import comb
 import os
 import copy
 from tqdm import trange
-from games.game import Game, contract, run_PSRO_uniform, run_PSRO_uniform_weaker, run_PSRO_uniform_stronger
+from games.game import Game, run_PSRO_uniform, run_PSRO_uniform_weaker, run_PSRO_uniform_stronger
 from games.blotto.differentiable_lotto_vis import gif_from_population
 
 

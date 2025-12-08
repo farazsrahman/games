@@ -1608,11 +1608,22 @@ def render_llm_competition_tab():
         elif phase == "generating":
             st.info("🔄 **Generating answers from both agents...**")
             try:
+                user_mode = state.get("user_mode", "interactive")
+                n_games_per_agent = state.get("n_games_per_agent", 1)
+                current_transcript = state.get("current_transcript", [])
+                games_remaining = n_games_per_agent - len(current_transcript)
+                
+                # If simulated_llm mode and multiple games remaining, batch generate all answers and preferences
+                if user_mode == "simulated_llm" and games_remaining > 1:
+                    # Batch generate all remaining games
+                    _batch_generate_training_games(state, games_remaining)
+                    return
+                
+                # Otherwise, process one game at a time (original behavior)
                 with st.spinner("Calling LLM API to generate responses (this may take 30-60 seconds)..."):
                     start_next_game(state)
                 
                 # If simulated user mode, automatically process feedback
-                user_mode = state.get("user_mode", "interactive")
                 if user_mode in ["simulated_feature", "simulated_llm"]:
                     question = state.get("current_question")
                     answer_a = state.get("current_answer_a")
@@ -2298,6 +2309,122 @@ def render_llm_competition_tab():
         st.info("👆 Click 'Initialize Training' to begin.")
 
 
+def _batch_generate_training_games(state, n_games):
+    """
+    Batch generate answers and preferences for multiple training games in parallel.
+    This is used when n_games_per_agent > 1 and user_mode is simulated_llm.
+    """
+    from datetime import datetime
+    from games.llms.llm_competition import (
+        simulate_user_choice_llm_batch,
+        generate_answers_batch,
+        COMPETITION_GAME_PROMPT
+    )
+    from games.llms.config_llm import format_answer_generation_prompt
+    
+    agent_idx = state["current_agent_a_idx"]
+    opponent_idx = state["current_agent_b_idx"]
+    population = state["population"]
+    fixed_questions = state.get("fixed_questions", state["game"].questions)
+    answer_cache = state.get("answer_cache", {})
+    
+    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] _batch_generate_training_games: Generating {n_games} games in parallel...")
+    
+    # Select questions for the games (cycle through fixed questions)
+    current_question_idx = state.get("current_question_idx", 0)
+    games_to_play = []
+    for i in range(n_games):
+        question = fixed_questions[(current_question_idx + i) % len(fixed_questions)]
+        games_to_play.append(question)
+    
+    # Collect all answers we need to generate
+    answer_prompts = []
+    answer_keys = []
+    
+    for question in games_to_play:
+        # Check if answers are cached
+        answer_a_key = (agent_idx, question)
+        answer_b_key = (opponent_idx, question)
+        
+        if answer_a_key not in answer_cache:
+            full_prompt = format_answer_generation_prompt(COMPETITION_GAME_PROMPT, population[agent_idx], question)
+            call_site = f"training_agent_{agent_idx}_q_{fixed_questions.index(question)}"
+            answer_prompts.append((full_prompt, call_site, answer_a_key))
+        
+        if answer_b_key not in answer_cache:
+            full_prompt = format_answer_generation_prompt(COMPETITION_GAME_PROMPT, population[opponent_idx], question)
+            call_site = f"training_agent_{opponent_idx}_q_{fixed_questions.index(question)}"
+            answer_prompts.append((full_prompt, call_site, answer_b_key))
+    
+    # Generate all answers in parallel
+    if answer_prompts:
+        from games.llms.config_llm import call_model_batch
+        batch_prompts = [(prompt, call_site) for prompt, call_site, _ in answer_prompts]
+        batch_results = call_model_batch(batch_prompts, max_workers=None, model_type="agent")
+        
+        # Cache the results
+        for prompt, call_site, cache_key in answer_prompts:
+            answer = batch_results.get(call_site, "")
+            if answer:
+                answer_cache[cache_key] = answer
+    
+    # Now collect all preferences we need to evaluate
+    llm_persona = state.get("llm_user_persona", "You are a helpful user evaluating answers to questions.")
+    preference_comparisons = []
+    
+    for question in games_to_play:
+        answer_a = answer_cache.get((agent_idx, question))
+        answer_b = answer_cache.get((opponent_idx, question))
+        
+        if answer_a and answer_b:
+            call_site = f"training_pref_{agent_idx}_{opponent_idx}_q_{fixed_questions.index(question)}"
+            cache_key = (agent_idx, opponent_idx, question)
+            preference_comparisons.append((answer_a, answer_b, question, call_site, cache_key))
+    
+    # Evaluate all preferences in parallel
+    if preference_comparisons:
+        # preference_comparisons is already in the correct format: (answer_a, answer_b, question, call_site, cache_key)
+        batch_results = simulate_user_choice_llm_batch(
+            preference_comparisons,
+            user_persona=llm_persona,
+            max_workers=None
+        )
+        
+        # Process all results and add to transcript
+        preference_cache = state.get("preference_cache", {})
+        current_transcript = state.get("current_transcript", [])
+        
+        for cache_key, user_choice in batch_results.items():
+            preference_cache[cache_key] = user_choice
+            
+            # Find the question for this cache key
+            agent_i, agent_j, question = cache_key
+            answer_a = answer_cache.get((agent_i, question))
+            answer_b = answer_cache.get((agent_j, question))
+            
+            if answer_a and answer_b:
+                payout = 1 if user_choice == "A" else (-1 if user_choice == "B" else 0)
+                transcript_entry = (question, answer_a, answer_b, payout)
+                current_transcript.append(transcript_entry)
+                print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Caching preference for training game: agent {agent_i} vs {agent_j} = {user_choice}")
+        
+        state["preference_cache"] = preference_cache
+        state["current_transcript"] = current_transcript
+        state["answer_cache"] = answer_cache
+        
+        # Update question index
+        state["current_question_idx"] = (current_question_idx + n_games) % len(fixed_questions)
+        
+        # Check if we've played enough games
+        if len(current_transcript) >= state["n_games_per_agent"]:
+            state["phase"] = "improving"
+        else:
+            state["phase"] = "generating"
+        
+        print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] _batch_generate_training_games: ✅ Completed {n_games} games. Transcript length: {len(current_transcript)}")
+        st.rerun()
+
+
 def _process_user_feedback(state, user_choice):
     """Process user feedback - works for both training games and preference collection."""
     if not state.get("current_question") or not state.get("current_answer_a") or not state.get("current_answer_b"):
@@ -2595,13 +2722,16 @@ def _generate_simulated_preferences_for_agent(state, agent_idx):
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-    from games.llms.llm_competition import simulate_user_choice, simulate_user_choice_llm
+    from games.llms.llm_competition import simulate_user_choice, simulate_user_choice_llm, simulate_user_choice_llm_batch
     
     fixed_questions = state.get("fixed_questions", [])
     answer_cache = state.get("answer_cache", {})
     preference_cache = state.get("preference_cache", {})
     game = state["game"]
     user_mode = state.get("user_mode", "interactive")
+    
+    # Collect all comparisons that need to be made
+    comparisons_to_make = []
     
     for existing_idx in range(agent_idx):
         for question in fixed_questions:
@@ -2612,22 +2742,38 @@ def _generate_simulated_preferences_for_agent(state, agent_idx):
                 answer_j = answer_cache.get((existing_idx, question))
                 
                 if answer_i and answer_j:
-                    # Simulate user choice based on mode
-                    if user_mode == "simulated_feature":
-                        user_choice = simulate_user_choice(
-                            answer_i, answer_j,
-                            game.user_prefs,
-                            question
-                        )
-                    else:  # simulated_llm
-                        llm_persona = state.get("llm_user_persona", "You are a helpful user evaluating answers to questions.")
-                        user_choice = simulate_user_choice_llm(
-                            answer_i, answer_j,
-                            question,
-                            llm_persona,
-                            f"simulate_prefs_{agent_idx}_{existing_idx}"
-                        )
-                    preference_cache[cache_key] = user_choice
+                    comparisons_to_make.append((answer_i, answer_j, question, cache_key))
+    
+    # Process comparisons based on mode
+    if user_mode == "simulated_feature":
+        # Sequential processing for feature-based simulation (fast, no need to parallelize)
+        for answer_i, answer_j, question, cache_key in comparisons_to_make:
+            user_choice = simulate_user_choice(
+                answer_i, answer_j,
+                game.user_prefs,
+                question
+            )
+            preference_cache[cache_key] = user_choice
+    else:  # simulated_llm - use parallel batch calls
+        if comparisons_to_make:
+            llm_persona = state.get("llm_user_persona", "You are a helpful user evaluating answers to questions.")
+            
+            # Prepare comparisons for batch call
+            batch_comparisons = []
+            for answer_i, answer_j, question, cache_key in comparisons_to_make:
+                call_site = f"simulate_prefs_{agent_idx}_{cache_key[1]}_{hash(question)}"
+                batch_comparisons.append((answer_i, answer_j, question, call_site, cache_key))
+            
+            # Make parallel batch calls
+            batch_results = simulate_user_choice_llm_batch(
+                batch_comparisons,
+                user_persona=llm_persona,
+                max_workers=None  # Use default
+            )
+            
+            # Store results in cache
+            for cache_key, user_choice in batch_results.items():
+                preference_cache[cache_key] = user_choice
     
     state["preference_cache"] = preference_cache
 
@@ -2646,18 +2792,35 @@ def _handle_interactive_egs(state):
     answer_cache = state.get("egs_answer_cache", {})
     cache_key_prefix = f"egs_{len(population)}_"
     
-    # Generate all answers if not cached
+    # Generate all answers if not cached (using parallel batch calls)
     if not answer_cache or len([k for k in answer_cache.keys() if k[0].startswith(cache_key_prefix)]) < n * len(questions):
-        st.info("🔄 Generating answers for all agents...")
+        st.info("🔄 Generating answers for all agents in parallel...")
         progress_text = st.empty()
+        
+        # Collect all uncached prompts
+        from games.llms.config_llm import call_model_batch, format_answer_generation_prompt
+        
+        uncached_prompts = []
+        cache_keys_to_update = []
         
         for i in range(n):
             for question in questions:
                 cache_key = (cache_key_prefix + str(i), question)
                 if cache_key not in answer_cache:
-                    progress_text.text(f"Generating answer for Agent {i+1}/{n}...")
-                    full_prompt = f"{COMPETITION_GAME_PROMPT}\n\n{population[i]}\n\nQuestion: {question}\n\nProvide your answer:"
-                    answer = call_model(full_prompt, f"egs_agent_{i}")
+                    full_prompt = format_answer_generation_prompt(COMPETITION_GAME_PROMPT, population[i], question)
+                    call_site = f"egs_agent_{i}_q_{questions.index(question)}"
+                    uncached_prompts.append((full_prompt, call_site))
+                    cache_keys_to_update.append(cache_key)
+        
+        # Generate all answers in parallel
+        if uncached_prompts:
+            progress_text.text(f"Generating {len(uncached_prompts)} answers in parallel...")
+            batch_results = call_model_batch(uncached_prompts, max_workers=None, model_type="agent")
+            
+            # Cache the results
+            for cache_key, (prompt, call_site) in zip(cache_keys_to_update, uncached_prompts):
+                answer = batch_results.get(call_site, "")
+                if answer:
                     answer_cache[cache_key] = answer
         
         state["egs_answer_cache"] = answer_cache

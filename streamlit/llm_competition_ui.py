@@ -56,24 +56,48 @@ def initialize_training_state(state: Dict[str, Any]) -> None:
 
 
 def generate_answers_for_agent(state: Dict[str, Any], agent_idx: int) -> None:
-    """Generate answers for an agent on all fixed questions and cache them."""
+    """Generate answers for an agent on all fixed questions and cache them (using parallel batch calls)."""
     from datetime import datetime
+    from games.llms.config_llm import call_model_batch, format_answer_generation_prompt
+    
     fixed_questions = state.get("fixed_questions", [])
     answer_cache = state.get("answer_cache", {})
     population = state["population"]
     
     print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] generate_answers_for_agent: Starting for agent {agent_idx} ({len(fixed_questions)} questions)")
     
+    # Collect uncached questions
+    uncached_questions = []
     for i, question in enumerate(fixed_questions):
         cache_key = (agent_idx, question)
         if cache_key not in answer_cache:
-            print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] generate_answers_for_agent: Generating answer {i+1}/{len(fixed_questions)} for agent {agent_idx}...")
-            full_prompt = f"{COMPETITION_GAME_PROMPT}\n\n{population[agent_idx]}\n\nQuestion: {question}\n\nProvide your answer:"
-            answer = call_model(full_prompt, f"agent_{agent_idx}_q_{i}")
-            answer_cache[cache_key] = answer
-            print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] generate_answers_for_agent: ✅ Cached answer {i+1}/{len(fixed_questions)}")
+            uncached_questions.append((i, question))
         else:
             print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] generate_answers_for_agent: Answer {i+1}/{len(fixed_questions)} already cached, skipping")
+    
+    # If there are uncached questions, generate them in parallel
+    if uncached_questions:
+        print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] generate_answers_for_agent: Generating {len(uncached_questions)} answers in parallel...")
+        
+        # Prepare prompts for batch call
+        batch_prompts = []
+        question_indices = []
+        for i, question in uncached_questions:
+            full_prompt = format_answer_generation_prompt(COMPETITION_GAME_PROMPT, population[agent_idx], question)
+            call_site = f"agent_{agent_idx}_q_{i}"
+            batch_prompts.append((full_prompt, call_site))
+            question_indices.append((i, question))
+        
+        # Make parallel batch calls
+        batch_results = call_model_batch(batch_prompts, max_workers=None, model_type="agent")
+        
+        # Cache the results
+        for (i, question), (prompt, call_site) in zip(question_indices, batch_prompts):
+            cache_key = (agent_idx, question)
+            answer = batch_results.get(call_site, "")
+            if answer:
+                answer_cache[cache_key] = answer
+                print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] generate_answers_for_agent: ✅ Cached answer {i+1}/{len(fixed_questions)}")
     
     print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] generate_answers_for_agent: ✅ Completed for agent {agent_idx}")
     state["answer_cache"] = answer_cache

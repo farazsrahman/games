@@ -6,6 +6,7 @@ and system prompts. Separated from game logic for better modularity.
 """
 import os
 from pathlib import Path
+from typing import List, Tuple, Dict, Optional
 
 try:
     from dotenv import load_dotenv
@@ -48,6 +49,14 @@ OPTIMIZER_MODEL_NAME = os.environ.get("GEMINI_OPTIMIZER_MODEL", "gemini-2.5-pro"
 MAX_TOKENS = int(os.environ.get("GEMINI_MAX_TOKENS", "8192"))
 OPTIMIZER_MAX_TOKENS = int(os.environ.get("GEMINI_OPTIMIZER_MAX_TOKENS", "4096"))
 TEMPERATURE = float(os.environ.get("GEMINI_TEMPERATURE", "1.0"))
+
+# Parallel execution configuration
+# For I/O-bound tasks (API calls), we can use more threads than CPU cores
+# Default: 20 concurrent requests (conservative to respect API rate limits)
+# Can be overridden via GEMINI_MAX_CONCURRENT_REQUESTS environment variable
+# Note: Gemini API typically allows 60+ requests per minute, but concurrent requests
+# should be limited to avoid overwhelming the API and hitting rate limits
+DEFAULT_MAX_WORKERS = int(os.environ.get("GEMINI_MAX_CONCURRENT_REQUESTS", "20"))
 
 # ============================================================================
 # SYSTEM PROMPTS
@@ -104,6 +113,62 @@ OUTPUT RULES (CRITICAL):
 - Use reasoning to carefully consider what the best new strategy_prompt is but do NOT include reasoning in the response
 - Return a string that has the following format "STRATEGY-PROMPT: <strategy-description-here>"
 """.strip()
+
+# ============================================================================
+# PROMPT FORMATTING FUNCTIONS
+# ============================================================================
+
+def format_answer_generation_prompt(game_prompt: str, strategy: str, question: str) -> str:
+    """
+    Format the prompt for generating an agent's answer to a question.
+    
+    Args:
+        game_prompt: The game instructions prompt
+        strategy: The agent's strategy prompt
+        question: The question to answer
+    
+    Returns:
+        Formatted prompt string
+    """
+    return f"{game_prompt}\n\n{strategy}\n\nQuestion: {question}\n\nProvide your answer:"
+
+
+def format_user_preference_prompt(
+    user_persona: str,
+    question: str,
+    answer_a: str,
+    answer_b: str
+) -> str:
+    """
+    Format the prompt for LLM-based user preference evaluation.
+    
+    Args:
+        user_persona: Description of the user persona
+        question: The question being answered
+        answer_a: First answer to compare
+        answer_b: Second answer to compare
+    
+    Returns:
+        Formatted prompt string
+    """
+    return f"""{user_persona}
+
+You are evaluating two answers to the following question:
+
+Question: {question}
+
+Answer A:
+{answer_a}
+
+Answer B:
+{answer_b}
+
+Which answer do you prefer? You must respond with exactly one of the following:
+- "A" if you prefer Answer A
+- "B" if you prefer Answer B
+- "TIE" if you have no preference or both answers are equally good
+
+Your response (A, B, or TIE):"""
 
 # ============================================================================
 # SAFETY SETTINGS
@@ -303,3 +368,169 @@ def call_optimizer_model(user_content: str, call_site: str = "optimizer") -> str
         print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] call_optimizer_model ({call_site}): ❌ Error after {elapsed:.2f} seconds: {e}")
         return "[ERROR: Optimizer call failed]"
 
+
+# ============================================================================
+# BATCH LLM CALLING FUNCTIONS (PARALLEL)
+# ============================================================================
+
+def _call_model_worker(args):
+    """
+    Worker function for parallel LLM calls.
+    
+    Args:
+        args: Tuple of (user_content, call_site, model_type)
+              where model_type is "agent" or "optimizer"
+    
+    Returns:
+        Tuple of (call_site, result_text) or (call_site, error_message)
+    """
+    user_content, call_site, model_type = args
+    
+    try:
+        if model_type == "optimizer":
+            result = call_optimizer_model(user_content, call_site)
+        else:
+            result = call_model(user_content, call_site)
+        return (call_site, result)
+    except Exception as e:
+        return (call_site, f"Error in parallel call: {str(e)}")
+
+
+def _call_model_worker_silent(args):
+    """
+    Worker function for parallel LLM calls with reduced logging (to avoid spam).
+    Only logs start/completion, not intermediate steps.
+    
+    Args:
+        args: Tuple of (user_content, call_site, model_type)
+              where model_type is "agent" or "optimizer"
+    
+    Returns:
+        Tuple of (call_site, result_text) or (call_site, error_message)
+    """
+    from datetime import datetime
+    import time
+    import google.generativeai as genai
+    
+    user_content, call_site, model_type = args
+    
+    try:
+        if model_type == "optimizer":
+            model_name = OPTIMIZER_MODEL_NAME
+            max_tokens = OPTIMIZER_MAX_TOKENS
+        else:
+            model_name = AGENT_MODEL_NAME
+            max_tokens = MAX_TOKENS
+        
+        print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] [PARALLEL] call_model ({call_site}): Starting API call...")
+        start_time = time.time()
+        
+        model = genai.GenerativeModel(
+            model_name=model_name,
+            generation_config={
+                "temperature": TEMPERATURE,
+                "max_output_tokens": max_tokens,
+            },
+            safety_settings=get_safety_settings()
+        )
+        
+        response = model.generate_content(user_content)
+        elapsed = time.time() - start_time
+        
+        result = extract_response_text(response)
+        print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] [PARALLEL] call_model ({call_site}): ✅ Completed in {elapsed:.2f}s ({len(result)} chars)")
+        
+        return (call_site, result)
+    except Exception as e:
+        elapsed = time.time() - start_time if 'start_time' in locals() else 0
+        print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] [PARALLEL] call_model ({call_site}): ❌ Error after {elapsed:.2f}s: {e}")
+        return (call_site, f"Error in parallel call: {str(e)}")
+
+
+def call_model_batch(
+    prompts: List[Tuple[str, str]],
+    max_workers: Optional[int] = None,
+    model_type: str = "agent"
+) -> Dict[str, str]:
+    """
+    Make multiple LLM calls in parallel using threads.
+    
+    Args:
+        prompts: List of (user_content, call_site) tuples
+        max_workers: Maximum number of parallel threads. If None, uses min(len(prompts), 10)
+        model_type: "agent" or "optimizer" to determine which model to use
+    
+    Returns:
+        Dictionary mapping call_site -> response_text
+    
+    Example:
+        >>> prompts = [
+        ...     ("What is 2+2?", "math_q1"),
+        ...     ("What is 3+3?", "math_q2"),
+        ... ]
+        >>> results = call_model_batch(prompts)
+        >>> print(results["math_q1"])  # Response for first prompt
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from datetime import datetime
+    
+    if not prompts:
+        return {}
+    
+    if max_workers is None:
+        # Default to min of prompt count and DEFAULT_MAX_WORKERS
+        # This balances performance with API rate limit considerations
+        # For I/O-bound tasks (API calls), we can use more threads than CPU cores
+        # but should respect API rate limits (typically 60+ requests/min for Gemini)
+        max_workers = min(len(prompts), DEFAULT_MAX_WORKERS)
+    
+    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] ⚡ call_model_batch: Starting {len(prompts)} PARALLEL {model_type} calls with {max_workers} workers...")
+    start_time = datetime.now()
+    
+    # Prepare arguments for workers
+    worker_args = [(user_content, call_site, model_type) for user_content, call_site in prompts]
+    
+    results = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] ⚡ call_model_batch: Submitting {len(prompts)} tasks to thread pool...")
+        future_to_site = {
+            executor.submit(_call_model_worker_silent, args): args[1] 
+            for args in worker_args
+        }
+        
+        # Collect results as they complete
+        completed = 0
+        for future in as_completed(future_to_site):
+            call_site = future_to_site[future]
+            try:
+                result_site, result_text = future.result()
+                results[result_site] = result_text
+                completed += 1
+                if completed % 5 == 0 or completed == len(prompts):
+                    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] ⚡ call_model_batch: Progress: {completed}/{len(prompts)} calls completed...")
+            except Exception as e:
+                print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] ⚡ call_model_batch: Error for {call_site}: {e}")
+                results[call_site] = f"Error: {str(e)}"
+    
+    elapsed = (datetime.now() - start_time).total_seconds()
+    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] ⚡ call_model_batch: ✅ All {len(prompts)} PARALLEL calls completed in {elapsed:.2f} seconds (avg: {elapsed/len(prompts):.2f}s per call)")
+    
+    return results
+
+
+def call_optimizer_model_batch(
+    prompts: List[Tuple[str, str]],
+    max_workers: Optional[int] = None
+) -> Dict[str, str]:
+    """
+    Make multiple optimizer model calls in parallel.
+    
+    Args:
+        prompts: List of (user_content, call_site) tuples
+        max_workers: Maximum number of parallel threads. If None, uses min(len(prompts), 10)
+    
+    Returns:
+        Dictionary mapping call_site -> response_text
+    """
+    return call_model_batch(prompts, max_workers=max_workers, model_type="optimizer")
