@@ -2459,29 +2459,27 @@ def main():
         st.header("About")
         st.markdown("""
         This application demonstrates Policy Space Response Oracles (PSRO) 
-        for various game theory scenarios:
         
         - **Disc Game**: Population diversity vs. convergence
         - **Blotto Game**: Resource allocation strategies
         - **Differentiable Lotto**: Continuous optimization
+        - **Penney's Game**: Strategic positioning
         """)
         
         st.markdown("---")
-        st.header("Session Info")
-        st.metric("Total Runs", len(st.session_state.runs))
-        
-        if st.button("Clear All Runs", type="secondary"):
-            st.session_state.runs = {}
-            st.rerun()
+        st.header("Group Members")
+        st.markdown("""
+        - **Jocelyn Chen**
+        - **Suha Memon**
+        - **Faraz Rahman**
+        """)
     
     # Main content tabs
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4 = st.tabs([
         "🎯 Disc Game",
         "⚔️ Blotto Game",
         "🎲 Differentiable Lotto",
         "🪙 Penney's Game",
-        "🤖 LLM Competition",
-        "📊 Comparison"
     ])
     
     with tab1:
@@ -2496,11 +2494,11 @@ def main():
     with tab4:
         render_penneys_game_tab()
     
-    with tab5:
-        render_llm_competition_tab()
+    # with tab5:
+    #     render_llm_competition_tab()
     
-    with tab6:
-        render_comparison_tab()
+    # with tab6:
+    #     render_comparison_tab()
 
 
 if __name__ == "__main__":
